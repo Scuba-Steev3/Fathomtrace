@@ -1,0 +1,98 @@
+Usage:
+  fathomtrace [scan] [TARGET] [OPTIONS]
+  fathomtrace help | --help
+
+Scan one IPv4 address or hostname with a bounded-concurrency common-port
+profile, then run relevant service-enumeration modules. TARGET defaults to
+127.0.0.1 for backward compatibility.
+
+Global options:
+  -h, --help                  Show this help and exit.
+      --version               Show the version and exit.
+  -q, --quiet                 Suppress routine text output and banners.
+  -v, --verbose               Show optional validation and skip details.
+      --debug                 Show debug details; implies --verbose.
+      --color MODE            Color mode: auto (default), always, or never.
+      --no-color              Compatibility alias for --color never.
+      --ascii                 Force safe ASCII status icons.
+      --unicode               Force Unicode status icons.
+      --show-secrets          Print and store supplied credentials without
+                              redaction. Unsafe for shared terminals or logs.
+
+Scan command options:
+      --profile NAME          Port profile: default (default), web, ad, or
+                              extended. Last value wins.
+      --ports LIST            Scan comma-separated ports/ranges instead of a
+                              profile. May be repeated; values are merged.
+      --dry-run               Validate and show the selected operation without
+                              connecting to the target or creating loot.
+      --vhost                 Enable virtual-host discovery when web ports open.
+      --vhost-domain DOMAIN   Use DOMAIN as the VHost suffix; implies --vhost.
+      --web-enum              Enable web content enumeration when applicable.
+      --service-detect        Run Nmap against discovered open ports only.
+      --kerb-enum             Enable Kerberos user enumeration.
+      --run-blood             Enable BloodHound collection when prerequisites
+                              and credentials are available.
+      --kerberoast            Enable Kerberoast collection when prerequisites
+                              and credentials are available.
+      --check-certs           Enable AD CS checks when prerequisites exist.
+      --check-mssql           Enable MSSQL enumeration when port 1433 is open.
+      --mssql-brute           Enable the legacy MSSQL default-credential check.
+      --mssql-privesc         Permit NetExec MSSQL privilege-escalation actions;
+                              may alter SQL principal privileges.
+      --mssql-enable-cmdshell Permit the authenticated MSSQL module to attempt
+                              enabling xp_cmdshell; changes server configuration.
+      --dns-enum              Enable DNS enumeration when port 53 is open.
+      --dns-brute             Also enable DNS name brute forcing.
+      --dns-domain DOMAIN     Set the DNS domain and enable DNS enumeration.
+      --dns-wordlist FILE     Set the DNS wordlist and enable DNS brute force.
+      --dns-no-axfr           Disable DNS zone-transfer attempts.
+
+Authentication options:
+  -u, --user USER             Username for selected authenticated modules.
+      --username USER         Compatibility alias for --user.
+  -p, --pass PASS             Password for selected authenticated modules.
+      --password PASS         Compatibility alias for --pass.
+      --domain DOMAIN         Authentication domain or Kerberos realm.
+  Options also accept the legacy --name=value, -u=value, and -p=value forms.
+  Authentication options are not repeatable; the last value wins.
+
+Output and loot options:
+      --format FORMAT         Console format: text (default), json, or csv.
+                              JSON/CSV write only the stable summary to stdout.
+      --no-loot               Do not create a session artifact directory.
+      --loot-dir PATH         Store session artifacts below PATH instead of
+                              recon_<sanitized-target>.
+      --index-format FORMAT   Artifact index: json (default), text, csv, or all.
+      --overwrite             Replace an explicitly colliding session directory.
+
+Performance options:
+      --jobs N                Concurrent TCP probes; default: 20, maximum: 256.
+      --connect-timeout SEC   Per-attempt TCP timeout; default: 2 seconds.
+      --retries N             Retry failed TCP probes N times; default: 0,
+                              maximum: 10.
+
+Validation options:
+      --skip-preflight        Skip optional reverse DNS and discovery preflight.
+                              Target syntax/resolution and safe paths remain
+                              mandatory.
+      --skip-null-checks      Skip optional anonymous/null-session checks.
+      --skip-guest-checks     Skip optional guest-account checks.
+
+Examples:
+  ./fathomtrace 10.10.10.10
+  ./fathomtrace scan dc01.example.test --profile ad --jobs 32
+  ./fathomtrace 10.10.10.10 --ports 22,80,443,8000-8010
+  ./fathomtrace dc01.example.test --domain example.test \
+      --user analyst --pass 'REPLACE_ME' --kerb-enum --check-certs
+  ./fathomtrace 10.10.10.10 --format json --no-color --no-loot
+  ./fathomtrace 127.0.0.1 --dry-run --debug --ascii
+
+Exit codes:
+  0  Requested operation completed.
+  2  Command-line usage error.
+  3  Invalid or unresolvable target.
+  4  Mandatory local runtime requirement is unavailable.
+  5  Scan orchestration failed.
+
+Use only on systems you own or are explicitly authorized to test.
