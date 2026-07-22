@@ -200,7 +200,6 @@ Project structure:
 
 ```text
 fathomtrace                 Main executable and service orchestration
-bash_simpleportscan.sh      Compatibility wrapper
 lib/fathomtrace/            Sourceable cross-cutting modules
 tests/                      Test runner and golden help fixture
 docs/ARCHITECTURE.md        Current architecture

@@ -267,6 +267,21 @@ assert_not_contains "$TEST_TMP/loot-unit/unit-session/raw/console-capture.txt" "
 )
 assert_contains "$TEST_TMP/show-secrets-unit" "topsecret" "explicit show-secrets mode bypasses redaction"
 
+# An anonymous rpcdump normally returns many UUIDs that are not in the small
+# attack-path map. Unknown UUIDs must be ignored without tripping `set -u`.
+RPC_FAKE_BIN="$TEST_TMP/rpc-fake-bin"
+mkdir -p "$RPC_FAKE_BIN"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$RPC_FAKE_BIN/timeout"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "UUID : aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa v1.0"\n' > "$RPC_FAKE_BIN/rpcdump.py"
+chmod +x "$RPC_FAKE_BIN/timeout" "$RPC_FAKE_BIN/rpcdump.py"
+PATH="$RPC_FAKE_BIN:$PATH" \
+    "$SCRIPT" 127.0.0.1 --ports 135 --connect-timeout .1 \
+    --no-loot --skip-preflight --no-color --ascii \
+    > "$TEST_TMP/rpc-unknown-uuid.stdout" 2> "$TEST_TMP/rpc-unknown-uuid.stderr"
+assert_eq 0 "$?" "unknown rpcdump UUID does not abort the scan"
+assert_contains "$TEST_TMP/rpc-unknown-uuid.stdout" "Anonymous MSRPC enumeration successful" "rpcdump fixture reaches UUID parsing"
+assert_not_contains "$TEST_TMP/rpc-unknown-uuid.stderr" "unbound variable" "unknown rpcdump UUID is ignored under nounset"
+
 # A selected but irrelevant module must not initialize or execute when its ports
 # and prerequisites were not discovered.
 FAKE_BIN="$TEST_TMP/fake-bin"
