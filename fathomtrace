@@ -210,6 +210,7 @@ DC_AUTH_OK=0
 LAPS_READABLE=false
 WEB_DETECTED=false
 WINRM_DETECTED=false
+WINRM_AUTH_DETECTED=false
 SSH_DETECTED=false
 ASREP_OK=false
 KERBEROS_AUTH_OK=false
@@ -5920,6 +5921,7 @@ if $CREDS_PROVIDED; then
                     | grep -qP 'WINRM\s+\S+\s+\d+\s+\S+\s+\[\+\]'; then
                 critical "WinRM Credential Access Confirmed!"
                 WINRM_DETECTED=true
+				WINRM_AUTH_DETECTED=true
                 winrm_command="$(sps_shell_join evil-winrm -i "$TARGET_IPV4" -u "$AUTH_USER" -p "$MASKED_AUTH_PASS")"
                 echo -e "        ${GREEN}${winrm_command}${RESET}"
                 record_command_argv "WINRM" "Authenticated shell" evil-winrm -i "$TARGET_IPV4" -u "$AUTH_USER" -p "$AUTH_PASS"
@@ -7569,6 +7571,21 @@ if [[ $HAS_WEB -eq 1 && $HAS_SMB -eq 1 ]]; then
 fi
 if [[ "$HAS_MSSQL" == "true" ]]; then
     finding "  MSSQL attack surface detected"
+    echo
+fi
+if [[ "$WINRM_DETECTED" == "true" && "$WINRM_AUTH_DETECTED" == "true" ]]; then
+    lightbulb "  WINRM login abuse detected"
+    echo
+elif [[ "$WINRM_DETECTED" == "true" ]]; then
+    finding "  WINRM detected"
+    echo
+fi
+if [[ "$WMI_AUTH_OK" == "true" ]]; then
+    lightbulb "  WMI login abuse detected"
+    echo
+fi
+if [[ "$PSEXEC_AUTH_OK" == "true" ]]; then
+    lightbulb "  PSEXEC login abuse detected"
     echo
 fi
 
