@@ -100,9 +100,9 @@ sps_secret_value() {
     local secret="${1:-}"
     if [[ "${SHOW_SECRETS:-false}" == true ]]; then
         #printf '%s' "$secret"
-		printf "'%s'" "$secret"
+		printf "%s" "$secret"
     elif [[ -n "$secret" ]]; then
-        printf "'%s'" "[REDACTED]"
+        printf "%s" "[REDACTED]"
     fi
 }
 
