@@ -99,9 +99,10 @@ sps_configure_output() {
 sps_secret_value() {
     local secret="${1:-}"
     if [[ "${SHOW_SECRETS:-false}" == true ]]; then
-        printf '%s' "$secret"
+        #printf '%s' "$secret"
+		printf "'%s'" "$secret"
     elif [[ -n "$secret" ]]; then
-        printf '%s' '[REDACTED]'
+        printf "'%s'" "[REDACTED]"
     fi
 }
 
@@ -145,7 +146,13 @@ sps_emit() {
             prefix="$ICON_INFO"
             color="$BLUE"
             ;;
-        finding)
+        lightbulb)
+            [[ "$message" == *"[DEBUG]"* && "${DEBUG:-false}" != true ]] && return 0
+            [[ "${QUIET:-false}" == true ]] && return 0
+			prefix="$ICON_TIP"
+            color="$YELLOW"
+            ;;
+		finding)
             prefix="$ICON_FIND"
             color="$CYAN"
             ;;
@@ -193,7 +200,7 @@ high_risk() { sps_emit warning "$*"; }
 critical() { sps_emit error "$*"; }
 danger() { sps_emit error "$*"; }
 alert() { sps_emit warning "$*"; }
-lightbulb() { sps_emit info "$*"; }
+lightbulb() { sps_emit lightbulb "$*"; }
 
 sps_section() {
     [[ "${QUIET:-false}" == true || "${OUTPUT_FORMAT:-text}" != "text" ]] && return 0
