@@ -49,6 +49,8 @@ All notable changes to this repository will be documented in this file.
 
 ### Added
 
+- Added automatic NetBIOS node-status discovery with `nmblookup` and `nbtscan`
+  fallback parsing for the target name, workgroup/domain, and reported MAC.
 - Added SecLists-aware FFUF web-content enumeration with
   `raft-small-words.txt` as the default, a generated fallback list, and a
   `--web-wordlist FILE` override.

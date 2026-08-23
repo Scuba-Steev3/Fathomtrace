@@ -12,7 +12,7 @@
 # Implemented capabilities:
 #   - Concurrent TCP connect scanning of common infrastructure and AD ports
 #   - Optional Nmap service, version, script, and OS detection
-#   - Reverse-DNS, LDAP RootDSE, TLS SAN, and HTTP redirect hostname discovery
+#   - Reverse-DNS, NetBIOS, LDAP RootDSE, TLS SAN, and HTTP redirect hostname discovery
 #   - HTTP/HTTPS redirect analysis, directory enumeration, and VHost discovery
 #   - DNS enumeration, AXFR testing, and optional subdomain brute forcing
 #   - FTP, SMB, RPC, LDAP/LDAPS, Kerberos, MSSQL, NFS, Docker, Redis,
@@ -127,6 +127,7 @@ source "$FATHOMTRACE_LIB_DIR/output.sh"
 source "$FATHOMTRACE_LIB_DIR/validation.sh"
 source "$FATHOMTRACE_LIB_DIR/loot.sh"
 source "$FATHOMTRACE_LIB_DIR/scan.sh"
+source "$FATHOMTRACE_LIB_DIR/netbios.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -232,6 +233,12 @@ KERBEROS_ACCESS_CONFIRMED=false
 SMB_PORT_OPEN=false
 SMB_SERVICE_CONFIRMED=false
 SMB_ACCESS_CONFIRMED=false
+NETBIOS_DETECTED=false
+NETBIOS_NAME=""
+NETBIOS_WORKGROUP=""
+NETBIOS_MAC=""
+NETBIOS_TOOL=""
+NETBIOS_LOOT_FILE=""
 REDIS_UNAUTH_CONFIRMED=false
 DOCKER_UNAUTH_CONFIRMED=false
 HTTP_FOUND=false
@@ -5291,6 +5298,9 @@ if [ "$ENABLE_SERVICE_DETECT" = true ]; then
     service_version_detection "$TARGET_IPV4" || true
 fi
 
+# --------- NetBIOS Name Service Detection (UDP/137) ----------
+sps_run_netbios_scan "$TARGET_IPV4" || true
+
 # --------- Define LDAP_DOMAIN ----------
 echo
 if [ -s "$LDAP_MARKER" ] && ! $LDAP_ENUM_DONE && sps_command_available ldapsearch; then
@@ -6907,7 +6917,18 @@ generate_synopsis() {
         fi
     fi
 
-    # 3. File Services
+    # 3. NetBIOS identity
+    if [[ "${NETBIOS_DETECTED:-false}" == true ]]; then
+        echo -e "\n ${CYAN}NETBIOS IDENTITY${RESET}"
+        echo -e " --------------------------------------"
+        echo -e "    Target name: ${GREEN}$NETBIOS_NAME${RESET}"
+        [[ -n "${NETBIOS_WORKGROUP:-}" ]] && echo -e "    Workgroup/domain: ${GREEN}$NETBIOS_WORKGROUP${RESET}"
+        [[ -n "${NETBIOS_MAC:-}" ]] && echo -e "    Reported MAC: ${GREEN}$NETBIOS_MAC${RESET}"
+        echo -e "    Detection tool: ${GREEN}$NETBIOS_TOOL${RESET}"
+        found_any=true
+    fi
+
+    # 4. File Services
     if [ "$SMB_V1" = true ] || [ "$SMB_V2" = true ] || [ "$SMB_V3" = true ] || [ "$FTP_ANON_OK" = true ] || [ "$SMB_GUEST_OK" = true ] || [ "$SMB_NULL_OK" = true ] || [ "$SMB_AUTH_OK" = true ]; then
         echo -e "\n ${CYAN}FILE SERVICES${RESET}"
         echo -e " --------------------------------------"
@@ -6921,7 +6942,7 @@ generate_synopsis() {
         print_item "$SMB_AUTH_OK" "Authenticated SMB access confirmed"
     fi
     
-    # 4. Web Services
+    # 5. Web Services
     if [ "$WEB_DETECTED" = true ]; then
         echo -e "\n ${CYAN}WEB SERVICES${RESET}"
         echo -e " --------------------------------------"
@@ -6930,7 +6951,7 @@ generate_synopsis() {
         print_item "$WEB_DETECTED" "  - Check for Local File Inclusion (LFI) abuse [lfi_tester.py]"
     fi
     
-    # 5. Known Vulnerabilities / Misconfigurations
+    # 6. Known Vulnerabilities / Misconfigurations
     if [[ "${REDIS_UNAUTH_CONFIRMED:-false}" == true || "${DOCKER_UNAUTH_CONFIRMED:-false}" == true ]]; then
         echo -e "\n ${CYAN}CONFIRMED UNAUTHENTICATED SERVICE EXPOSURES${RESET}"
         echo -e " --------------------------------------"

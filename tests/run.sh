@@ -234,6 +234,76 @@ assert_contains "$TEST_TMP/scan-unit/web-services" "http:3000" "web service evid
 assert_contains "$TEST_TMP/scan-unit/ldap" "389" "LDAP open-port state is recorded"
 assert_not_contains "$TEST_TMP/scan-unit/hints" "KERBEROS" "LDAP does not imply Kerberos"
 
+# Unit-test NetBIOS name-table parsing and tool fallback without network access.
+(
+    source "$ROOT_DIR/lib/fathomtrace/output.sh"
+    source "$ROOT_DIR/lib/fathomtrace/validation.sh"
+    source "$ROOT_DIR/lib/fathomtrace/netbios.sh"
+    OUTPUT_FORMAT=text QUIET=true DEBUG=false VERBOSE=false COLOR_MODE=never ICON_MODE=ascii
+    AUTH_PASS="" SMB_PASS=""
+    sps_configure_output
+    mkdir -p "$TEST_TMP/netbios-unit/bin"
+    cd "$TEST_TMP/netbios-unit"
+    HOSTS_FILE="$TEST_TMP/netbios-unit/hosts"
+    DISCOVERED_HOSTS="$TEST_TMP/netbios-unit/discovered"
+    touch "$HOSTS_FILE" "$DISCOVERED_HOSTS"
+    sanitize_name() { printf '%s' "$1" | tr -c '[:alnum:]._' '_'; }
+    record_command_argv() { :; }
+    record_loot() { :; }
+    record_module_status() { :; }
+    sps_record_finding() { :; }
+
+    printf '%s\n' \
+        'Looking up status of 192.0.2.20' \
+        '        FILESRV         <00> -         B <ACTIVE>' \
+        '        LAB             <00> - <GROUP> B <ACTIVE>' \
+        '        FILESRV         <20> -         B <ACTIVE>' \
+        '        MAC Address = 00:11:22:33:44:55' > nmblookup.fixture
+    sps_parse_nmblookup_name nmblookup.fixture > "$TEST_TMP/netbios-nmb-name"
+    sps_parse_nmblookup_workgroup nmblookup.fixture > "$TEST_TMP/netbios-nmb-workgroup"
+    sps_parse_nmblookup_mac nmblookup.fixture > "$TEST_TMP/netbios-nmb-mac"
+
+    printf '%s\n' \
+        '192.0.2.20:LAB:00G' \
+        '192.0.2.20:FALLBACK:20U' \
+        '192.0.2.20:FALLBACK:00U' > nbtscan.fixture
+    sps_parse_nbtscan_name nbtscan.fixture > "$TEST_TMP/netbios-nbtscan-name"
+    sps_parse_nbtscan_workgroup nbtscan.fixture > "$TEST_TMP/netbios-nbtscan-workgroup"
+
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        "printf '%s\\n' 'Looking up status of 192.0.2.20' '        FILESRV <00> - B <ACTIVE>' '        LAB <00> - <GROUP> B <ACTIVE>' '        FILESRV <20> - B <ACTIVE>' '        MAC Address = 00:11:22:33:44:55'" \
+        > "$TEST_TMP/netbios-unit/bin/nmblookup"
+    printf '%s\n' \
+        '#!/usr/bin/env bash' \
+        "printf '%s\\n' '192.0.2.20:LAB:00G' '192.0.2.20:FALLBACK:00U'" \
+        > "$TEST_TMP/netbios-unit/bin/nbtscan"
+    chmod +x "$TEST_TMP/netbios-unit/bin/nmblookup" "$TEST_TMP/netbios-unit/bin/nbtscan"
+    PATH="$TEST_TMP/netbios-unit/bin:$PATH"
+    SPS_VALIDATION_CACHE=()
+    sps_run_netbios_scan 192.0.2.20
+    printf '%s|%s|%s|%s\n' "$NETBIOS_NAME" "$NETBIOS_WORKGROUP" "$NETBIOS_MAC" "$NETBIOS_TOOL" \
+        > "$TEST_TMP/netbios-primary-result"
+    cp "$HOSTS_FILE" "$TEST_TMP/netbios-primary-hosts"
+
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$TEST_TMP/netbios-unit/bin/nmblookup"
+    chmod +x "$TEST_TMP/netbios-unit/bin/nmblookup"
+    : > "$HOSTS_FILE"
+    : > "$DISCOVERED_HOSTS"
+    SPS_VALIDATION_CACHE=()
+    sps_run_netbios_scan 192.0.2.20
+    printf '%s|%s|%s\n' "$NETBIOS_NAME" "$NETBIOS_WORKGROUP" "$NETBIOS_TOOL" \
+        > "$TEST_TMP/netbios-fallback-result"
+)
+assert_eq "FILESRV" "$(cat "$TEST_TMP/netbios-nmb-name")" "nmblookup parser selects the unique workstation name"
+assert_eq "LAB" "$(cat "$TEST_TMP/netbios-nmb-workgroup")" "nmblookup parser selects the group name"
+assert_eq "00:11:22:33:44:55" "$(cat "$TEST_TMP/netbios-nmb-mac")" "nmblookup parser selects the reported MAC"
+assert_eq "FALLBACK" "$(cat "$TEST_TMP/netbios-nbtscan-name")" "nbtscan parser selects the unique workstation name"
+assert_eq "LAB" "$(cat "$TEST_TMP/netbios-nbtscan-workgroup")" "nbtscan parser selects the group name"
+assert_eq "FILESRV|LAB|00:11:22:33:44:55|nmblookup" "$(cat "$TEST_TMP/netbios-primary-result")" "NetBIOS scan records primary-tool identity fields"
+assert_contains "$TEST_TMP/netbios-primary-hosts" "192.0.2.20 filesrv" "NetBIOS hostname is added to host suggestions"
+assert_eq "FALLBACK|LAB|nbtscan" "$(cat "$TEST_TMP/netbios-fallback-result")" "NetBIOS scan falls back to nbtscan"
+
 # Unit-test artifact sanitization, atomic manifests, deduplication, and failures.
 (
     source "$ROOT_DIR/lib/fathomtrace/output.sh"

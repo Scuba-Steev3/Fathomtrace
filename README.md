@@ -14,7 +14,7 @@ it is named after, it turns an unfamiliar target into a useful service map.
 - Maintained default, web, Active Directory, and extended TCP port profiles.
 - Custom ports and ranges with configurable jobs, timeouts, and retries.
 - Deterministic worker aggregation instead of concurrent shared-file writes.
-- Service-aware FTP, SMB, RPC, LDAP, Kerberos, DNS, web, MSSQL, NFS, Docker,
+- Service-aware NetBIOS, FTP, SMB, RPC, LDAP, Kerberos, DNS, web, MSSQL, NFS, Docker,
   Redis, Kubernetes, database, WinRM, RDP, AD CS, and BloodHound integrations.
 - Text output for operators and stable JSON/CSV summaries for automation.
 - Quiet, verbose, debug, color, ASCII, and Unicode presentation controls.
@@ -32,7 +32,14 @@ as `find`, `cp`, `chmod`, and `wc`.
 
 External utilities are optional. Their modules run only when their service and
 feature prerequisites are satisfied. Examples include Nmap, curl, OpenSSL,
-ffuf, DNS/LDAP/SMB clients, NetExec, Impacket, Certipy, and BloodHound tooling.
+ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, NetExec, Impacket,
+Certipy, and BloodHound tooling.
+
+NetBIOS identity detection runs automatically against the selected target. It
+uses `nmblookup -A` when available and falls back to `nbtscan`. A valid unique
+workstation or file-server name is displayed, retained with the raw node-status
+evidence, and added to the `/etc/hosts` suggestions. On Kali, install either
+provider with `sudo apt install samba-common-bin` or `sudo apt install nbtscan`.
 
 ## Install
 
