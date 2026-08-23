@@ -99,6 +99,15 @@ run_cli invalid-jobs 127.0.0.1 --dry-run --no-loot --jobs 0
 assert_eq 2 "$CLI_RC" "invalid worker count uses CLI exit code"
 assert_contains "$CLI_STDERR" "--jobs must be" "invalid worker count is explained"
 
+(
+    TARGET=""
+    source "$ROOT_DIR/lib/fathomtrace/cli.sh"
+    sps_cli_defaults
+    sps_parse_args scan 127.0.0.1 --jobs 37 --ports 80
+    printf '%s:%s\n' "$MAX_JOBS" "$MAX_JOBS_EXPLICIT"
+) > "$TEST_TMP/explicit-jobs.txt"
+assert_contains "$TEST_TMP/explicit-jobs.txt" "37:true" "explicit --jobs is tracked for FFUF"
+
 run_cli invalid-target 999.1.1.1 --dry-run --no-loot --skip-preflight --format json
 assert_eq 3 "$CLI_RC" "invalid target uses target exit code"
 assert_contains "$CLI_STDOUT" '"status":"failed"' "structured errors include status"
@@ -111,9 +120,20 @@ assert_contains "$CLI_STDERR" "compatibility alias" "legacy alias emits deprecat
 
 run_cli vhost-domain 127.0.0.1 --dry-run --no-loot --skip-preflight --vhost-domain Example.Test --ports 3000,5000,9090,18080
 assert_eq 0 "$CLI_RC" "--vhost-domain is accepted and implies --vhost"
+run_cli vhost-wordlist 127.0.0.1 --dry-run --no-loot --skip-preflight --vhost-wordlist "$TEST_TMP/custom-vhosts.txt" --vhost-domain Example.Test --ports 80
+assert_eq 0 "$CLI_RC" "--vhost-wordlist is accepted and implies --vhost"
+run_cli missing-vhost-wordlist-value 127.0.0.1 --dry-run --no-loot --vhost-wordlist
+assert_eq 2 "$CLI_RC" "missing --vhost-wordlist value uses CLI exit code"
+assert_contains "$CLI_STDERR" "--vhost-wordlist requires a value" "missing VHost wordlist is explained"
 run_cli invalid-vhost-domain 127.0.0.1 --dry-run --no-loot --skip-preflight --vhost-domain 'not a domain' --ports 80
 assert_eq 2 "$CLI_RC" "invalid --vhost-domain uses CLI exit code"
 assert_contains "$CLI_STDERR" "--vhost-domain requires" "invalid VHost domain is explained"
+
+run_cli web-wordlist 127.0.0.1 --dry-run --no-loot --skip-preflight --web-wordlist "$TEST_TMP/custom-web-paths.txt" --ports 80
+assert_eq 0 "$CLI_RC" "--web-wordlist is accepted and implies --web-enum"
+run_cli missing-web-wordlist-value 127.0.0.1 --dry-run --no-loot --web-wordlist
+assert_eq 2 "$CLI_RC" "missing --web-wordlist value uses CLI exit code"
+assert_contains "$CLI_STDERR" "--web-wordlist requires a value" "missing web wordlist is explained"
 
 run_cli mssql-safe-default 127.0.0.1 --dry-run --no-loot --skip-preflight --check-mssql --ports 1433
 assert_eq 0 "$CLI_RC" "MSSQL enumeration dry run succeeds"

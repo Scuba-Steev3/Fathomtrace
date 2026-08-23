@@ -28,7 +28,11 @@ Scan command options:
                               connecting to the target or creating loot.
       --vhost                 Enable virtual-host discovery when web ports open.
       --vhost-domain DOMAIN   Use DOMAIN as the VHost suffix; implies --vhost.
+      --vhost-wordlist FILE   Use FILE for VHost labels; implies --vhost.
+                              Defaults to SecLists top-5000 subdomains.
       --web-enum              Enable web content enumeration when applicable.
+      --web-wordlist FILE     Use FILE for FFUF content discovery; implies
+                              --web-enum. Defaults to SecLists raft-small-words.
       --service-detect        Run Nmap against discovered open ports only.
       --kerb-enum             Enable Kerberos user enumeration.
       --run-blood             Enable BloodHound collection when prerequisites
@@ -68,6 +72,8 @@ Output and loot options:
 
 Performance options:
       --jobs N                Concurrent TCP probes; default: 20, maximum: 256.
+                              When supplied, N also sets FFUF threads; otherwise
+                              FFUF defaults to 50 threads.
       --connect-timeout SEC   Per-attempt TCP timeout; default: 2 seconds.
       --retries N             Retry failed TCP probes N times; default: 0,
                               maximum: 10.

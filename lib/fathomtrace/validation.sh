@@ -77,6 +77,16 @@ sps_optional_tool_check() {
     return 1
 }
 
+sps_optional_wordlist_check() {
+    local feature="$1" wordlist="$2"
+    if [[ -r "$wordlist" && -s "$wordlist" ]]; then
+        debug "$feature preflight: found wordlist $wordlist"
+        return 0
+    fi
+    debug "$feature preflight: wordlist unavailable ($wordlist); built-in fallback will be used if reached"
+    return 1
+}
+
 sps_run_optional_preflight() {
     [[ "${SKIP_PREFLIGHT:-false}" == true ]] && {
         debug "Optional preflight disabled by --skip-preflight"
@@ -84,9 +94,21 @@ sps_run_optional_preflight() {
     }
 
     [[ "${ENABLE_SERVICE_DETECT:-false}" == true ]] && sps_optional_tool_check "service detection" nmap || true
-    [[ "${ENABLE_WEB_ENUM:-false}" == true ]] && sps_optional_tool_check "web enumeration" ffuf || true
-    [[ "${ENABLE_VHOST:-false}" == true ]] && sps_optional_tool_check "VHost discovery" curl || true
+    if [[ "${ENABLE_WEB_ENUM:-false}" == true ]]; then
+        sps_optional_tool_check "web enumeration" ffuf || true
+        sps_optional_wordlist_check "web enumeration" \
+            "${WEB_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt}" || true
+    fi
+    if [[ "${ENABLE_VHOST:-false}" == true ]]; then
+        sps_optional_tool_check "VHost discovery" ffuf curl || true
+        sps_optional_wordlist_check "VHost discovery" \
+            "${VHOST_WORDLIST:-/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt}" || true
+    fi
     [[ "${ENABLE_DNS_ENUM:-false}" == true ]] && sps_optional_tool_check "DNS enumeration" dig || true
+    if [[ "${DNS_BRUTE:-false}" == true ]]; then
+        sps_optional_wordlist_check "DNS brute force" \
+            "${DNS_WORDLIST:-/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt}" || true
+    fi
     [[ "${ENABLE_BH_EXPORT:-false}" == true ]] && sps_optional_tool_check "BloodHound" bloodhound-python bloodhound-ce-python || true
     [[ "${ENABLE_ADCS:-false}" == true ]] && sps_optional_tool_check "AD CS" certipy-ad || true
     [[ "${ENABLE_MSSQL_ENUM:-false}" == true || "${ENABLE_MSSQL_BRUTE:-false}" == true ]] &&

@@ -105,6 +105,25 @@ Feature flags include `--vhost`, `--web-enum`, `--service-detect`,
 `--kerb-enum`, `--kerberoast`, `--run-blood`, `--check-certs`,
 `--check-mssql`, `--mssql-brute`, and DNS enumeration controls.
 
+`--web-enum` uses FFUF for directory and file discovery. It prefers SecLists'
+`/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt` and falls back
+to a small built-in list when that file is unavailable. Use
+`--web-wordlist FILE` to select another web-content list. FFUF uses 50 threads
+by default; when `--jobs N` is explicitly supplied, FFUF uses `N` threads.
+DNS brute forcing
+continues to default to
+`/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt`; that list
+contains subdomain labels and is not the directory-enumeration default.
+
+`--vhost --vhost-domain DOMAIN` uses FFUF Host-header fuzzing with automatic
+calibration and the same SecLists top-5000 subdomain list. Use
+`--vhost-wordlist FILE` to override it. A missing list falls back to the
+built-in VHost names. If FFUF is unavailable, fails, or its JSON results cannot
+be parsed, Fathomtrace performs a smaller curl-based check and compares
+candidates against two randomized wildcard-host baselines; unstable wildcard
+responses are skipped rather than reported as likely false positives. FFUF uses
+50 threads unless `--jobs N` was supplied.
+
 MSSQL enumeration does not attempt privilege escalation or enable
 `xp_cmdshell` by default. Those actions require `--mssql-privesc` or
 `--mssql-enable-cmdshell` plus valid credentials. Confirm that each action is

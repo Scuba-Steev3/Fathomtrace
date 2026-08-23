@@ -139,12 +139,14 @@ DOMAIN_CONTROLLER=""
 DOMAIN_SID=""
 ENABLE_VHOST=false
 VHOST_DOMAIN=""
+VHOST_WORDLIST="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 ENABLE_MSSQL_BRUTE=false
 ENABLE_MSSQL_ENUM=false
 ENABLE_MSSQL_PRIVESC=false
 ENABLE_MSSQL_CMDSHELL=false
 ENABLE_KERB_ENUM=false
 ENABLE_WEB_ENUM=false
+WEB_WORDLIST="/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
 ENABLE_BH_EXPORT=false
 ENABLE_KERBROAST=false
 KERBEROS_FOUND=false
@@ -317,6 +319,7 @@ CREDS_PROVIDED=false
 
 # --------- Concurrency ----------
 MAX_JOBS=20
+MAX_JOBS_EXPLICIT=false
 
 declare -a ATTACK_PATHS=()
 
@@ -3312,18 +3315,37 @@ run_ffuf_enum() {
     local scheme="$1" port="$2" target_ip="$3"
     local url="${scheme}://${target_ip}:${port}"
     local ffuf_out="ffuf_$(sanitize_name "$target_ip")_${port}.json"
-    local ffuf_wordlist rc=0 result_count=0 display_command
+    local ffuf_wordlist="${WEB_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt}"
+    local generated_wordlist="" display_wordlist rc=0 result_count=0 display_command
+    local ffuf_threads=50
     local -a command_args=()
 
-    ffuf_wordlist="$(mktemp "$RUNTIME_TMP_DIR/ffuf-wordlist.XXXXXX")"
-    printf '%s\n' "${COMMON_FUFF_PATHS[@]}" > "$ffuf_wordlist"
-    printf '%s\n' "${COMMON_FUFF_PATHS[@]/%/.php}" >> "$ffuf_wordlist"
+    if [[ "${MAX_JOBS_EXPLICIT:-false}" == true ]]; then
+        ffuf_threads="$MAX_JOBS"
+    fi
+
+    if [[ -r "$ffuf_wordlist" && -s "$ffuf_wordlist" ]]; then
+        display_wordlist="$ffuf_wordlist"
+        debug "Web enumeration wordlist found: $ffuf_wordlist"
+    else
+        warn "Web wordlist not found or unreadable: $ffuf_wordlist"
+        lightbulb "Install SecLists or specify --web-wordlist /path/to/web-content-list.txt"
+        generated_wordlist="$(mktemp "$RUNTIME_TMP_DIR/ffuf-wordlist.XXXXXX")"
+        printf '%s\n' "${COMMON_FUFF_PATHS[@]}" > "$generated_wordlist"
+        printf '%s\n' "${COMMON_FUFF_PATHS[@]/%/.php}" >> "$generated_wordlist"
+        ffuf_wordlist="$generated_wordlist"
+        display_wordlist="[generated-common-paths]"
+        notify "Using the built-in fallback web-content list"
+    fi
+
     command_args=(ffuf -u "$url/FUZZ" -w "$ffuf_wordlist" \
+        -ic -ac \
         -mc 200,204,301,302,307,401,403 -fc 404 \
-        -t 50 -timeout 5 -o "$ffuf_out" -of json)
-    display_command="$(sps_shell_join ffuf -u "$url/FUZZ" -w '[generated-common-paths]' \
+        -t "$ffuf_threads" -timeout 5 -o "$ffuf_out" -of json)
+    display_command="$(sps_shell_join ffuf -u "$url/FUZZ" -w "$display_wordlist" \
+        -ic -ac \
         -mc 200,204,301,302,307,401,403 -fc 404 \
-        -t 50 -timeout 5 -o "$ffuf_out" -of json)"
+        -t "$ffuf_threads" -timeout 5 -o "$ffuf_out" -of json)"
 
     info "Web enumeration executing against $url"
     printf '        %b%s%b\n' "$GREEN" "$display_command" "$RESET"
@@ -3333,7 +3355,9 @@ run_ffuf_enum() {
     else
         rc=$?
     fi
-    rm -f -- "$ffuf_wordlist"
+    if [[ -n "$generated_wordlist" ]]; then
+        rm -f -- "$generated_wordlist"
+    fi
 
     if ((rc != 0)); then
         warn "Web enumeration failed for $url (ffuf exit $rc)"
@@ -3371,24 +3395,175 @@ run_ffuf_enum() {
     return 0
 }
 
-# --- VHost Fuzzing Function ---
-run_vhost_fuzz() {
+# --- VHost Fuzzing Functions ---
+sps_vhost_candidate_valid() {
+    local candidate="$1" base_domain="$2"
+    sps_is_hostname "$candidate" && [[ "$candidate" == *."$base_domain" ]]
+}
+
+run_vhost_fuzz_ffuf() {
     local scheme="$1" port="$2" target_ip="$3" domains_file="$4"
     local url="${scheme}://${target_ip}:${port}"
-    local baseline response base_domain word vhost rc=0 count=0
+    local base_domain candidate status length ffuf_out display_command rc
+    local output_file="vhosts_$(sanitize_name "$target_ip")_${port}.tsv"
+    local vhost_wordlist="${VHOST_WORDLIST:-/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt}"
+    local generated_wordlist="" display_wordlist
+    local ffuf_threads=50 count=0 successful_runs=0 failed_runs=0
+    local -a command_args=()
+
+    if [[ "${MAX_JOBS_EXPLICIT:-false}" == true ]]; then
+        ffuf_threads="$MAX_JOBS"
+    fi
+
+    if [[ -r "$vhost_wordlist" && -s "$vhost_wordlist" ]]; then
+        display_wordlist="$vhost_wordlist"
+        debug "VHost wordlist found: $vhost_wordlist"
+    else
+        warn "VHost wordlist not found or unreadable: $vhost_wordlist"
+        lightbulb "Install SecLists or specify --vhost-wordlist /path/to/subdomain-list.txt"
+        generated_wordlist="$(mktemp "$RUNTIME_TMP_DIR/vhost-wordlist.XXXXXX")"
+        printf '%s\n' "${COMMON_VHOSTS[@]}" > "$generated_wordlist"
+        vhost_wordlist="$generated_wordlist"
+        display_wordlist="[generated-common-vhosts]"
+        notify "Using the built-in fallback VHost list"
+    fi
+
+    info "VHost discovery executing with FFUF against $url"
+    : > "$output_file"
+    while IFS= read -r base_domain; do
+        base_domain="${base_domain,,}"
+        base_domain="${base_domain%.}"
+        [[ -n "$base_domain" ]] || continue
+        if ! sps_is_hostname "$base_domain" || [[ "$base_domain" != *.* ]]; then
+            warn "Skipping invalid VHost base domain: $base_domain"
+            failed_runs=$((failed_runs + 1))
+            continue
+        fi
+
+        ffuf_out="vhosts_ffuf_$(sanitize_name "$target_ip")_${port}_$(sanitize_name "$base_domain").json"
+        command_args=(ffuf -u "${url}/" -w "$vhost_wordlist" \
+            -H "Host: FUZZ.${base_domain}" -ic -ac -mc all \
+            -t "$ffuf_threads" -timeout 5 -o "$ffuf_out" -of json)
+        display_command="$(sps_shell_join ffuf -u "${url}/" -w "$display_wordlist" \
+            -H "Host: FUZZ.${base_domain}" -ic -ac -mc all \
+            -t "$ffuf_threads" -timeout 5 -o "$ffuf_out" -of json)"
+        printf '        %b%s%b\n' "$GREEN" "$display_command" "$RESET"
+        record_command "Web" "FFUF VHost enumeration for $base_domain on $url" "$display_command"
+
+        if "${command_args[@]}" < /dev/null > /dev/null 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
+        if ((rc != 0)); then
+            warn "VHost enumeration failed for $base_domain on $url (ffuf exit $rc)"
+            failed_runs=$((failed_runs + 1))
+            continue
+        fi
+        if [[ ! -s "$ffuf_out" ]]; then
+            warn "VHost enumeration produced no JSON output for $base_domain on $url"
+            failed_runs=$((failed_runs + 1))
+            continue
+        fi
+
+        if command -v jq >/dev/null 2>&1; then
+            if ! jq -e '.results | type == "array"' "$ffuf_out" >/dev/null 2>&1; then
+                warn "Ignoring malformed FFUF JSON for $base_domain on $url"
+                record_loot "vhost_ffuf_results" "$url $base_domain (malformed JSON)" "$ffuf_out"
+                failed_runs=$((failed_runs + 1))
+                continue
+            fi
+            successful_runs=$((successful_runs + 1))
+            while IFS=$'\t' read -r candidate status length; do
+                [[ -n "$candidate" ]] || continue
+                candidate="${candidate,,}"
+                candidate="${candidate%.}"
+                if ! sps_vhost_candidate_valid "$candidate" "$base_domain"; then
+                    debug "Ignoring invalid FFUF VHost candidate: $candidate"
+                    continue
+                fi
+                finding "Possible VHost: $candidate ($url; status $status, length $length)"
+                printf '%s\t%s\t%s:%s\t%s\n' \
+                    "$candidate" "$url" "$status" "$length" "ffuf-auto-calibrated" >> "$output_file"
+                printf '%s %s\n' "$target_ip" "$candidate" >> "$HOSTS_FILE"
+                count=$((count + 1))
+            done < <(jq -r --arg domain "$base_domain" \
+                '.results[] | [((.input.FUZZ // "") + "." + $domain), (.status | tostring), (.length | tostring)] | @tsv' \
+                "$ffuf_out")
+        else
+            warn "jq is unavailable; saving raw FFUF VHost results and attempting the curl fallback"
+            record_loot "vhost_ffuf_results" "$url $base_domain" "$ffuf_out"
+            failed_runs=$((failed_runs + 1))
+            continue
+        fi
+        record_loot "vhost_ffuf_results" "$url $base_domain" "$ffuf_out"
+    done < "$domains_file"
+
+    if [[ -n "$generated_wordlist" ]]; then
+        rm -f -- "$generated_wordlist"
+    fi
+
+    if [[ -s "$output_file" ]]; then
+        sort -u "$output_file" -o "$output_file"
+        sort -u "$HOSTS_FILE" -o "$HOSTS_FILE"
+        count="$(wc -l < "$output_file" | tr -d '[:space:]')"
+        record_loot "vhost_candidates" "$url ($count candidate(s))" "$output_file"
+        sps_record_finding \
+            "WEB-VHOST-CANDIDATES-${port}" "informational" "medium" \
+            "$count auto-calibrated Host-header candidate(s) observed for $url" \
+            "HTTP service confirmed|Base domain available|ffuf available" "Manual content validation" \
+            "active-read" "$output_file" \
+            "Review unintended virtual hosts and restrict sensitive applications by network and authentication controls." \
+            "Only HTTP requests with alternate Host headers were sent; remove any temporary local /etc/hosts entries added during validation."
+    else
+        rm -f -- "$output_file"
+    fi
+
+    if ((successful_runs == 0)); then
+        return 1
+    fi
+    record_module_status "vhost:${scheme}:${port}" "executed" \
+        "$count candidate(s); successful_runs=$successful_runs; failed_runs=$failed_runs"
+    success "VHost discovery executed for $url; $count auto-calibrated candidate(s)"
+    return 0
+}
+
+run_vhost_fuzz_curl() {
+    local scheme="$1" port="$2" target_ip="$3" domains_file="$4"
+    local url="${scheme}://${target_ip}:${port}"
+    local baseline baseline_check base_domain wildcard_host word vhost response
+    local request_errors=0 count=0 stable_domains=0
     local output_file="vhosts_$(sanitize_name "$target_ip")_${port}.tsv"
     local -a curl_args=(curl -k -sS -o /dev/null -L --max-time "$CONNECT_TIMEOUT")
 
-    info "VHost discovery executing against $url"
-    if ! baseline="$("${curl_args[@]}" -w '%{http_code}:%{size_download}' "$url" 2> /dev/null)"; then
-        warn "VHost discovery failed for $url (baseline request failed)"
-        record_module_status "vhost:${scheme}:${port}" "failed" "baseline curl request failed"
-        return 1
-    fi
-
+    warn "Using limited built-in curl VHost checks"
     : > "$output_file"
     while IFS= read -r base_domain; do
+        base_domain="${base_domain,,}"
+        base_domain="${base_domain%.}"
         [[ -n "$base_domain" ]] || continue
+        if ! sps_is_hostname "$base_domain" || [[ "$base_domain" != *.* ]]; then
+            warn "Skipping invalid VHost base domain: $base_domain"
+            continue
+        fi
+        wildcard_host="fathomtrace-$RANDOM-$RANDOM.${base_domain}"
+        if ! baseline="$("${curl_args[@]}" -H "Host: $wildcard_host" \
+            -w '%{http_code}:%{size_download}' "$url" 2> /dev/null)"; then
+            warn "VHost discovery failed for $base_domain on $url (wildcard baseline request failed)"
+            request_errors=$((request_errors + 1))
+            continue
+        fi
+        wildcard_host="fathomtrace-$RANDOM-$RANDOM.${base_domain}"
+        if ! baseline_check="$("${curl_args[@]}" -H "Host: $wildcard_host" \
+            -w '%{http_code}:%{size_download}' "$url" 2> /dev/null)"; then
+            request_errors=$((request_errors + 1))
+            continue
+        fi
+        if [[ "$baseline" != "$baseline_check" ]]; then
+            warn "Skipping curl VHost checks for $base_domain: wildcard baseline is unstable"
+            continue
+        fi
+        stable_domains=$((stable_domains + 1))
         for word in "${COMMON_VHOSTS[@]}"; do
             vhost="${word}.${base_domain}"
             if response="$("${curl_args[@]}" -H "Host: $vhost" \
@@ -3400,17 +3575,20 @@ run_vhost_fuzz() {
                     count=$((count + 1))
                 fi
             else
-                rc=1
+                request_errors=$((request_errors + 1))
             fi
         done
     done < "$domains_file"
 
     if [[ -s "$output_file" ]]; then
+        sort -u "$output_file" -o "$output_file"
+        sort -u "$HOSTS_FILE" -o "$HOSTS_FILE"
+        count="$(wc -l < "$output_file" | tr -d '[:space:]')"
         record_loot "vhost_candidates" "$url ($count candidate(s))" "$output_file"
         sps_record_finding \
             "WEB-VHOST-CANDIDATES-${port}" "informational" "medium" \
             "$count Host-header response difference(s) observed for $url" \
-            "HTTP service confirmed|Base domain available|curl available" "Manual baseline and content validation" \
+            "HTTP service confirmed|Base domain available|curl available|Wildcard baseline stable" "Manual content validation" \
             "active-read" "$output_file" \
             "Review unintended virtual hosts and restrict sensitive applications by network and authentication controls." \
             "Only HTTP requests with alternate Host headers were sent; remove any temporary local /etc/hosts entries added during validation."
@@ -3418,9 +3596,28 @@ run_vhost_fuzz() {
         rm -f -- "$output_file"
     fi
 
-    record_module_status "vhost:${scheme}:${port}" "executed" "$count candidate(s); request_errors=$rc"
+    if ((stable_domains == 0)); then
+        record_module_status "vhost:${scheme}:${port}" "failed" "no stable wildcard baseline; request_errors=$request_errors"
+        return 1
+    fi
+    record_module_status "vhost:${scheme}:${port}" "executed" "$count candidate(s); request_errors=$request_errors"
     success "VHost discovery executed for $url; $count response-difference candidate(s)"
     return 0
+}
+
+run_vhost_fuzz() {
+    if command -v ffuf >/dev/null 2>&1; then
+        if run_vhost_fuzz_ffuf "$@"; then
+            return 0
+        fi
+        warn "FFUF VHost discovery failed; attempting the limited curl fallback"
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        run_vhost_fuzz_curl "$@"
+        return $?
+    fi
+    record_module_status "vhost:${1}:${2}" "failed" "neither usable ffuf nor curl execution"
+    return 1
 }
 
 sps_report_module_outcome() {
@@ -3486,8 +3683,8 @@ run_selected_web_modules() {
         sps_prepare_vhost_domains "$domains_file"
         if [[ ! -s "$WEB_SERVICES_FILE" ]]; then
             sps_report_module_outcome "vhost" "skipped" "no protocol-confirmed HTTP/HTTPS service"
-        elif ! command -v curl >/dev/null 2>&1; then
-            sps_report_module_outcome "vhost" "skipped" "curl is unavailable"
+        elif ! command -v ffuf >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+            sps_report_module_outcome "vhost" "skipped" "neither ffuf nor curl is available"
         elif [[ ! -s "$domains_file" ]]; then
             sps_report_module_outcome "vhost" "skipped" "no base domain; provide --vhost-domain DOMAIN"
         else

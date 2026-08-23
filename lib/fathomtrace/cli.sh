@@ -11,6 +11,7 @@ sps_cli_defaults() {
     SCAN_PROFILE="default"
     CUSTOM_PORTS=""
     MAX_JOBS=20
+    MAX_JOBS_EXPLICIT=false
     CONNECT_TIMEOUT=2
     RETRY_LIMIT=0
     OUTPUT_FORMAT="text"
@@ -25,6 +26,7 @@ sps_cli_defaults() {
     SKIP_NULL_CHECKS=false
     SKIP_GUEST_CHECKS=false
     VHOST_DOMAIN=""
+    VHOST_WORDLIST="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
     LOOT_ENABLED=true
     LOOT_BASE_DIR=""
     OVERWRITE=false
@@ -129,11 +131,13 @@ sps_parse_args() {
                 ;;
             --jobs=*)
                 MAX_JOBS="${option#*=}"
+                MAX_JOBS_EXPLICIT=true
                 ;;
             --jobs)
                 shift
                 sps_require_value "$option" "${1:-}" || return $?
                 MAX_JOBS="$1"
+                MAX_JOBS_EXPLICIT=true
                 ;;
             --connect-timeout=*)
                 CONNECT_TIMEOUT="${option#*=}"
@@ -199,10 +203,32 @@ sps_parse_args() {
                 VHOST_DOMAIN="$1"
                 ENABLE_VHOST=true
                 ;;
+            --vhost-wordlist=*)
+                VHOST_WORDLIST="${option#*=}"
+                sps_require_value "--vhost-wordlist" "$VHOST_WORDLIST" || return $?
+                ENABLE_VHOST=true
+                ;;
+            --vhost-wordlist)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                VHOST_WORDLIST="$1"
+                ENABLE_VHOST=true
+                ;;
             --kerb-enum)
                 ENABLE_KERB_ENUM=true
                 ;;
             --web-enum)
+                ENABLE_WEB_ENUM=true
+                ;;
+            --web-wordlist=*)
+                WEB_WORDLIST="${option#*=}"
+                sps_require_value "--web-wordlist" "$WEB_WORDLIST" || return $?
+                ENABLE_WEB_ENUM=true
+                ;;
+            --web-wordlist)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                WEB_WORDLIST="$1"
                 ENABLE_WEB_ENUM=true
                 ;;
             --run-blood)
@@ -392,7 +418,11 @@ Scan command options:
                               connecting to the target or creating loot.
       --vhost                 Enable virtual-host discovery when web ports open.
       --vhost-domain DOMAIN   Use DOMAIN as the VHost suffix; implies --vhost.
+      --vhost-wordlist FILE   Use FILE for VHost labels; implies --vhost.
+                              Defaults to SecLists top-5000 subdomains.
       --web-enum              Enable web content enumeration when applicable.
+      --web-wordlist FILE     Use FILE for FFUF content discovery; implies
+                              --web-enum. Defaults to SecLists raft-small-words.
       --service-detect        Run Nmap against discovered open ports only.
       --kerb-enum             Enable Kerberos user enumeration.
       --run-blood             Enable BloodHound collection when prerequisites
@@ -432,6 +462,8 @@ Output and loot options:
 
 Performance options:
       --jobs N                Concurrent TCP probes; default: 20, maximum: 256.
+                              When supplied, N also sets FFUF threads; otherwise
+                              FFUF defaults to 50 threads.
       --connect-timeout SEC   Per-attempt TCP timeout; default: 2 seconds.
       --retries N             Retry failed TCP probes N times; default: 0,
                               maximum: 10.

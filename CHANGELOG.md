@@ -49,6 +49,12 @@ All notable changes to this repository will be documented in this file.
 
 ### Added
 
+- Added SecLists-aware FFUF web-content enumeration with
+  `raft-small-words.txt` as the default, a generated fallback list, and a
+  `--web-wordlist FILE` override.
+- Added SecLists-backed FFUF VHost enumeration with automatic calibration,
+  validated result parsing, a `--vhost-wordlist FILE` override, and a
+  wildcard-aware curl fallback.
 - Text, JSON, and CSV console formats with schema-versioned machine summaries and
   diagnostics isolated on standard error.
 - Unique per-run session directories with raw, parsed, evidence, sensitive loot,
