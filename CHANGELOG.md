@@ -69,6 +69,11 @@ All notable changes to this repository will be documented in this file.
   and refactor contracts.
 - A pre-refactor architecture and behavior assessment in `docs/ASSESSMENT.md`.
 
+### Fixed
+
+- Restored the `bash_simpleportscan.sh` compatibility wrapper and made the
+  installer continue with a warning if an incomplete source package omits it.
+
 ### Deprecated
 
 - `--svc` remains accepted as an alias for `--service-detect`.

@@ -51,7 +51,11 @@ mkdir -p -- "$BIN_DIR" "$LIB_DIR"
 install -m 0755 "$SCRIPT_DIR/fathomtrace" "$BIN_DIR/fathomtrace"
 install -m 0644 "$SCRIPT_DIR"/lib/fathomtrace/*.sh "$LIB_DIR/"
 if [[ "$INSTALL_LEGACY_WRAPPER" == true ]]; then
-    install -m 0755 "$SCRIPT_DIR/bash_simpleportscan.sh" "$BIN_DIR/bash_simpleportscan.sh"
+    if [[ -f "$SCRIPT_DIR/bash_simpleportscan.sh" ]]; then
+        install -m 0755 "$SCRIPT_DIR/bash_simpleportscan.sh" "$BIN_DIR/bash_simpleportscan.sh"
+    else
+        printf '%s\n' '[!] Legacy wrapper is missing; continuing without bash_simpleportscan.sh.' >&2
+    fi
 fi
 
 printf '[+] Installed Fathomtrace to %s\n' "$PREFIX"

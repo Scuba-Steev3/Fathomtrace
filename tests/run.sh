@@ -87,6 +87,13 @@ assert_eq 0 "$?" "installed prefix layout resolves libraries"
 assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.0.0" "installed command reports the Fathomtrace version"
 assert_no_file "$TEST_TMP/install-prefix/bin/bash_simpleportscan.sh" "installer can omit the legacy wrapper"
 
+"$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix-legacy" > "$TEST_TMP/install-legacy.stdout" 2> "$TEST_TMP/install-legacy.stderr"
+assert_eq 0 "$?" "default installer exits successfully"
+assert_file "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" "default installer includes the legacy wrapper"
+"$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" --version > "$TEST_TMP/installed-legacy.stdout" 2> "$TEST_TMP/installed-legacy.stderr"
+assert_eq 0 "$?" "installed legacy wrapper exits successfully"
+assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.0.0" "installed legacy wrapper delegates to Fathomtrace"
+
 run_cli unknown --definitely-unknown
 assert_eq 2 "$CLI_RC" "unknown option uses CLI exit code"
 assert_contains "$CLI_STDERR" "Unknown option" "unknown option is explained"
