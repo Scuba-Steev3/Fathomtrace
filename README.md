@@ -109,8 +109,12 @@ Run `fathomtrace --help` for the canonical reference.
 | Authentication | `--user USER`, `--pass PASS`, `--domain DOMAIN` |
 
 When TCP/3389 is open and both `--user` and `--pass` are supplied, Fathomtrace
-uses `xfreerdp3` or `xfreerdp` with `/auth-only` and NLA to validate the single
-credential pair without opening a desktop session. The summary reports
+prefers `xfreerdp3` or `xfreerdp` with its auth-only mode (`+auth-only` on
+FreeRDP 3, with legacy `/auth-only` compatibility) and NLA to validate the
+single credential pair without opening a desktop session. If a compatible
+FreeRDP client is unavailable, `nxc rdp` or `netexec rdp` is used as a bounded
+single-target, single-credential fallback without screenshot or command
+options. The summary reports
 `success`, `failure`, or `skipped`. A successful result is added to the Attack
 Path Decision Engine as an authenticated RDP remote-service opportunity mapped
 to MITRE ATT&CK T1021.001. Missing FreeRDP support, timeouts, and transport or
