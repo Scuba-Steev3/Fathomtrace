@@ -49,6 +49,10 @@ All notable changes to this repository will be documented in this file.
 
 ### Added
 
+- Added non-interactive FreeRDP `/auth-only` credential validation when TCP/3389
+  is open and explicit credentials are supplied, with success/failure/skipped
+  summary state and an authenticated remote-service attack path mapped to MITRE
+  ATT&CK T1021.001.
 - Added automatic NetBIOS node-status discovery with `nmblookup` and `nbtscan`
   fallback parsing for the target name, workgroup/domain, and reported MAC.
 - Added SecLists-aware FFUF web-content enumeration with

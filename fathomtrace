@@ -128,6 +128,7 @@ source "$FATHOMTRACE_LIB_DIR/validation.sh"
 source "$FATHOMTRACE_LIB_DIR/loot.sh"
 source "$FATHOMTRACE_LIB_DIR/scan.sh"
 source "$FATHOMTRACE_LIB_DIR/netbios.sh"
+source "$FATHOMTRACE_LIB_DIR/rdp.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -214,6 +215,10 @@ LAPS_READABLE=false
 WEB_DETECTED=false
 WINRM_DETECTED=false
 WINRM_AUTH_DETECTED=false
+RDP_PORT_OPEN=false
+RDP_AUTH_OK=false
+RDP_AUTH_STATUS="skipped"
+RDP_AUTH_REASON="TCP/3389 is not open"
 SSH_DETECTED=false
 ASREP_OK=false
 KERBEROS_AUTH_OK=false
@@ -5292,6 +5297,7 @@ OPEN_PORTS=()
 if [ -s "$OPEN_PORTS_FILE" ]; then
     mapfile -t OPEN_PORTS < <(sort -n "$OPEN_PORTS_FILE")
 fi
+printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "3389" && RDP_PORT_OPEN=true
 
 # --------- Optional Service / Version / OS Detection ----------
 if [ "$ENABLE_SERVICE_DETECT" = true ]; then
@@ -6100,6 +6106,8 @@ fi
 #############################################
 # Check to see what Credentials can access
 #############################################
+sps_run_rdp_auth_check "$TARGET_IPV4"
+
 if $CREDS_PROVIDED; then
     #echo "[DEBUG] Creds were provided"
     # Check creds is Kerberos Service is deteted.
@@ -6899,9 +6907,13 @@ generate_synopsis() {
     fi
     
     # 2. Remote Management
-    if [ "$WINRM_DETECTED" = true ] || [ "$SSH_DETECTED" = true ] || [ "$WMI_AUTH_OK" = true ] || [ "$PSEXEC_AUTH_OK" = true ] || [ "$RPC_ANON_OK" = true ] || [ "$RPC_GUEST_OK" = true ] || [ "$RPC_AUTH_OK" = true ]; then
+    if [ "$RDP_PORT_OPEN" = true ] || [ "$WINRM_DETECTED" = true ] || [ "$SSH_DETECTED" = true ] || [ "$WMI_AUTH_OK" = true ] || [ "$PSEXEC_AUTH_OK" = true ] || [ "$RPC_ANON_OK" = true ] || [ "$RPC_GUEST_OK" = true ] || [ "$RPC_AUTH_OK" = true ]; then
         echo -e "\n ${CYAN}REMOTE MANAGEMENT SERVICES${RESET}"
         echo -e " --------------------------------------"
+        if [[ "$RDP_PORT_OPEN" == true ]]; then
+            echo -e " [!] ${RED}RDP credential validation: $(sps_rdp_auth_summary)${RESET}"
+            found_any=true
+        fi
         print_item "$WINRM_DETECTED" "WinRM Service is Open and Access is Allowed (Possible Lateral Movement)"
         print_item "$WMI_AUTH_OK" "WMI is Open and Access is Allowed (Possible Lateral Movement)"
         print_item "$PSEXEC_AUTH_OK" "PSExec Access is Allowed (Possible Lateral Movement)"
@@ -6979,6 +6991,14 @@ attack_path_evaluation() {
     if [[ $HAS_SMB -eq 1 && $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 ]]; then
         echo -e "\n ${CYAN}ACTIVE DIRECTORY SERVICES${RESET}"
         echo -e " --------------------------------------"
+    fi
+
+    if sps_rdp_authenticated_remote_service; then
+        ATTACK_PATHS+=("Authenticated RDP remote-service opportunity (MITRE ATT&CK T1021.001)")
+        critical "Attack Path: Authenticated RDP remote-service opportunity (MITRE ATT&CK T1021.001)"
+        note "Evidence: non-interactive FreeRDP /auth-only NLA authentication succeeded for $AUTH_USER on $TARGET_IPV4:3389"
+        lightbulb "Next step: confirm Remote Desktop logon rights and authorization before starting an interactive RDP session."
+        echo
     fi
     # ---------------------------------------------------------------------------
     # Domain-controller version context
@@ -7766,6 +7786,7 @@ printf '    LDAP:     %s / %s / %s\n' "$LDAP_PORT_OPEN" "$LDAP_SERVICE_CONFIRMED
 printf '    Kerberos: %s / %s / %s\n' "$KERBEROS_PORT_OPEN" "$KERBEROS_SERVICE_CONFIRMED" "$KERBEROS_ACCESS_CONFIRMED"
 printf '    SMB:      %s / %s / %s\n' "$SMB_PORT_OPEN" "$SMB_SERVICE_CONFIRMED" "$SMB_ACCESS_CONFIRMED"
 printf '    Web:      %s / %s / %s\n' "$WEB_PORT_OPEN" "$WEB_SERVICE_CONFIRMED" "$WEB_ACCESS_CONFIRMED"
+printf '    RDP auth: %s\n' "$(sps_rdp_auth_summary)"
 
 if [[ $HAS_SMB -eq 1 && $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 ]]; then
     alert "Observed AD-related service surface: SMB, LDAP, and Kerberos"
