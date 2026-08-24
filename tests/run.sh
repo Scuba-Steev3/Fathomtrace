@@ -304,40 +304,26 @@ assert_eq "FILESRV|LAB|00:11:22:33:44:55|nmblookup" "$(cat "$TEST_TMP/netbios-pr
 assert_contains "$TEST_TMP/netbios-primary-hosts" "192.0.2.20 filesrv" "NetBIOS hostname is added to host suggestions"
 assert_eq "FALLBACK|LAB|nbtscan" "$(cat "$TEST_TMP/netbios-fallback-result")" "NetBIOS scan falls back to nbtscan"
 
-# Unit-test non-interactive RDP credential classification without a network connection.
-rdp_fake_client() {
-    if [[ "${1:-}" == /help ]]; then
-        if [[ "${RDP_FAKE_HELP_MODE:-modern}" == legacy ]]; then
-            printf '%s\n' "/auth-only  Authenticate only"
-        else
-            printf '%s\n' "+auth-only  Enable Authenticate only"
-        fi
-        return 0
-    fi
-    printf '%s\n' "$@" > "$RDP_ARG_LOG"
-    case "$RDP_FAKE_MODE" in
-        success)
-            printf '%s\n' "Authentication only, exit status 0"
-            return 0
-            ;;
-        failure)
-            printf '%s\n' "ERRCONNECT_LOGON_FAILURE"
-            return 1
-            ;;
-        *)
-            printf '%s\n' "ERRCONNECT_CONNECT_TRANSPORT_FAILED"
-            return 1
-            ;;
-    esac
-}
-
+# Unit-test bounded NetExec RDP credential classification without a network connection.
 rdp_fake_netexec() {
     if [[ "${1:-}" == rdp && "${2:-}" == --help ]]; then
         printf '%s\n' "usage: nxc rdp [-h] target"
         return 0
     fi
     printf '%s\n' "$@" > "$RDP_ARG_LOG"
-    printf '%s\n' 'RDP 192.0.2.25 3389 HOST [+] LAB\\analyst:********'
+    case "$RDP_FAKE_MODE" in
+        success)
+            printf '%s\n' 'RDP 192.0.2.25 3389 HOST [+] LAB\\analyst:********'
+            ;;
+        failure)
+            printf '%s\n' 'RDP 192.0.2.25 3389 HOST [-] LAB\\analyst:******** (STATUS_LOGON_FAILURE)'
+            return 1
+            ;;
+        *)
+            printf '%s\n' 'RDP 192.0.2.25 3389 HOST [-] connection timed out'
+            return 1
+            ;;
+    esac
 }
 
 (
@@ -345,10 +331,10 @@ rdp_fake_netexec() {
     info() { :; }
     success() { :; }
     warn() { :; }
-    record_command_argv() { :; }
+    record_command_argv() { printf '%s\n' "$@" > "$TEST_TMP/rdp-command-log"; }
     record_module_status() { :; }
     sps_record_finding() { printf '%s\n' "$1" > "$TEST_TMP/rdp-finding"; }
-    xfreerdp3() { rdp_fake_client "$@"; }
+    nxc() { rdp_fake_netexec "$@"; }
     timeout() {
         shift
         "$@"
@@ -357,55 +343,23 @@ rdp_fake_netexec() {
     export RDP_FAKE_MODE RDP_ARG_LOG
     RDP_PORT_OPEN=true CREDS_PROVIDED=true AUTH_USER=analyst AUTH_PASS=topsecret AUTH_DOMAIN=LAB LDAP_DOMAIN=""
     sps_run_rdp_auth_check 192.0.2.25
-    printf '%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-success.result"
+    printf '%s|%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_PROVIDER" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-success.result"
 )
-assert_contains "$TEST_TMP/rdp-success.result" "success|true|RDP authentication via FreeRDP +auth-only accepted" "RDP auth-only success is classified"
-assert_contains "$TEST_TMP/rdp-success.args" "+auth-only" "RDP validation uses FreeRDP 3 auth-only mode"
-assert_contains "$TEST_TMP/rdp-success.args" "/sec:nla" "RDP validation explicitly uses NLA"
-assert_contains "$TEST_TMP/rdp-success.args" "/d:LAB" "RDP validation passes the supplied domain"
+assert_contains "$TEST_TMP/rdp-success.result" "success|true|netexec|NetExec RDP accepted" "NetExec RDP success is classified"
+assert_contains "$TEST_TMP/rdp-success.args" "rdp" "RDP validation uses the NetExec RDP protocol"
+assert_contains "$TEST_TMP/rdp-success.args" "-d" "NetExec RDP validation passes the supplied domain"
+assert_contains "$TEST_TMP/rdp-command-log" "Single-target credential validation via NetExec RDP" "NetExec RDP command is sent to the command artifact logger"
+assert_contains "$TEST_TMP/rdp-command-log" "timeout" "logged NetExec RDP command includes its outer timeout"
 assert_contains "$TEST_TMP/rdp-finding" "RDP-AUTH-T1021-001" "successful RDP authentication records the ATT&CK-mapped finding"
 
 (
     source "$ROOT_DIR/lib/fathomtrace/rdp.sh"
-    RDP_FAKE_HELP_MODE=legacy
-    export RDP_FAKE_HELP_MODE
-    sps_rdp_auth_only_arg rdp_fake_client > "$TEST_TMP/rdp-legacy-auth-only.result"
-)
-assert_eq "/auth-only" "$(cat "$TEST_TMP/rdp-legacy-auth-only.result")" "RDP validation retains legacy auth-only compatibility"
-
-(
-    source "$ROOT_DIR/lib/fathomtrace/rdp.sh"
     info() { :; }
     success() { :; }
     warn() { :; }
     record_command_argv() { :; }
     record_module_status() { :; }
-    sps_record_finding() { printf '%s\n' "$1" > "$TEST_TMP/rdp-netexec-finding"; }
-    sps_find_rdp_client() { return 1; }
     nxc() { rdp_fake_netexec "$@"; }
-    timeout() {
-        shift
-        "$@"
-    }
-    RDP_ARG_LOG="$TEST_TMP/rdp-netexec.args"
-    export RDP_ARG_LOG
-    RDP_PORT_OPEN=true CREDS_PROVIDED=true AUTH_USER=analyst AUTH_PASS=topsecret AUTH_DOMAIN=LAB LDAP_DOMAIN=""
-    sps_run_rdp_auth_check 192.0.2.25
-    printf '%s|%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_PROVIDER" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-netexec.result"
-)
-assert_contains "$TEST_TMP/rdp-netexec.result" "success|true|netexec|RDP authentication via NetExec RDP accepted" "NetExec RDP fallback classifies a successful login"
-assert_contains "$TEST_TMP/rdp-netexec.args" "rdp" "NetExec fallback uses the RDP protocol"
-assert_contains "$TEST_TMP/rdp-netexec.args" "-d" "NetExec fallback passes the supplied domain"
-assert_contains "$TEST_TMP/rdp-netexec-finding" "RDP-AUTH-T1021-001" "NetExec RDP success records the ATT&CK-mapped finding"
-
-(
-    source "$ROOT_DIR/lib/fathomtrace/rdp.sh"
-    info() { :; }
-    success() { :; }
-    warn() { :; }
-    record_command_argv() { :; }
-    record_module_status() { :; }
-    xfreerdp3() { rdp_fake_client "$@"; }
     timeout() {
         shift
         "$@"
@@ -416,14 +370,13 @@ assert_contains "$TEST_TMP/rdp-netexec-finding" "RDP-AUTH-T1021-001" "NetExec RD
     sps_run_rdp_auth_check 192.0.2.25
     printf '%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-failure.result"
 )
-assert_contains "$TEST_TMP/rdp-failure.result" "failure|false|RDP authentication via FreeRDP +auth-only rejected" "RDP credential rejection is classified"
+assert_contains "$TEST_TMP/rdp-failure.result" "failure|false|NetExec RDP rejected" "RDP credential rejection is classified"
 
 (
     source "$ROOT_DIR/lib/fathomtrace/rdp.sh"
     info() { :; }
     warn() { :; }
     record_module_status() { :; }
-    xfreerdp3() { rdp_fake_client "$@"; }
     timeout() {
         shift
         "$@"
@@ -435,7 +388,7 @@ assert_contains "$TEST_TMP/rdp-failure.result" "failure|false|RDP authentication
     printf '%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-skipped.result"
 )
 assert_contains "$TEST_TMP/rdp-skipped.result" "skipped|false|explicit credentials were not supplied" "RDP validation stays opt-in"
-assert_no_file "$TEST_TMP/rdp-skipped.args" "skipped RDP validation does not invoke FreeRDP"
+assert_no_file "$TEST_TMP/rdp-skipped.args" "skipped RDP validation does not invoke NetExec"
 
 # Unit-test artifact sanitization, atomic manifests, deduplication, and failures.
 (
