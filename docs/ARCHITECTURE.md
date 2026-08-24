@@ -11,8 +11,8 @@ cross-cutting boundaries are sourceable and independently testable.
 - `lib/fathomtrace/output.sh` owns presentation, redaction, and structured output.
 - `lib/fathomtrace/validation.sh` validates targets and selected prerequisites.
 - `lib/fathomtrace/scan.sh` expands profiles and runs the bounded worker pool.
-- `lib/fathomtrace/rdp.sh` performs and classifies non-interactive RDP/NLA
-  credential validation.
+- `lib/fathomtrace/rdp.sh` selects FreeRDP auth-only or a bounded NetExec RDP
+  fallback and classifies non-interactive credential validation.
 - `lib/fathomtrace/loot.sh` owns secure session storage and manifests.
 
 ## Execution flow
