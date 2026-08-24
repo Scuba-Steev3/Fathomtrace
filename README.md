@@ -32,8 +32,8 @@ as `find`, `cp`, `chmod`, and `wc`.
 
 External utilities are optional. Their modules run only when their service and
 feature prerequisites are satisfied. Examples include Nmap, curl, OpenSSL,
-ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, NetExec, Impacket,
-Certipy, and BloodHound tooling.
+ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, FreeRDP, NetExec,
+Impacket, Certipy, and BloodHound tooling.
 
 NetBIOS identity detection runs automatically against the selected target. It
 uses `nmblookup -A` when available and falls back to `nbtscan`. A valid unique
@@ -107,6 +107,15 @@ Run `fathomtrace --help` for the canonical reference.
 | Artifacts | `--no-loot`, `--loot-dir PATH`, `--index-format text\|json\|csv\|all`, `--overwrite` |
 | Optional checks | `--skip-preflight`, `--skip-null-checks`, `--skip-guest-checks` |
 | Authentication | `--user USER`, `--pass PASS`, `--domain DOMAIN` |
+
+When TCP/3389 is open and both `--user` and `--pass` are supplied, Fathomtrace
+uses `xfreerdp3` or `xfreerdp` with `/auth-only` and NLA to validate the single
+credential pair without opening a desktop session. The summary reports
+`success`, `failure`, or `skipped`. A successful result is added to the Attack
+Path Decision Engine as an authenticated RDP remote-service opportunity mapped
+to MITRE ATT&CK T1021.001. Missing FreeRDP support, timeouts, and transport or
+protocol errors are reported as skipped/inconclusive rather than as bad
+credentials.
 
 Feature flags include `--vhost`, `--web-enum`, `--service-detect`,
 `--kerb-enum`, `--kerberoast`, `--run-blood`, `--check-certs`,
