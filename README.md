@@ -32,7 +32,7 @@ as `find`, `cp`, `chmod`, and `wc`.
 
 External utilities are optional. Their modules run only when their service and
 feature prerequisites are satisfied. Examples include Nmap, curl, OpenSSL,
-ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, FreeRDP, NetExec,
+ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, NetExec,
 Impacket, Certipy, and BloodHound tooling.
 
 NetBIOS identity detection runs automatically against the selected target. It
@@ -109,15 +109,13 @@ Run `fathomtrace --help` for the canonical reference.
 | Authentication | `--user USER`, `--pass PASS`, `--domain DOMAIN` |
 
 When TCP/3389 is open and both `--user` and `--pass` are supplied, Fathomtrace
-prefers `xfreerdp3` or `xfreerdp` with its auth-only mode (`+auth-only` on
-FreeRDP 3, with legacy `/auth-only` compatibility) and NLA to validate the
-single credential pair without opening a desktop session. If a compatible
-FreeRDP client is unavailable, `nxc rdp` or `netexec rdp` is used as a bounded
-single-target, single-credential fallback without screenshot or command
-options. The summary reports
+uses `nxc rdp` or `netexec rdp` to validate exactly that single credential pair.
+The command is wrapped in a 20-second outer timeout and recorded in the command
+artifacts; screenshot, command-execution, and interactive-session options are
+not enabled. The summary reports
 `success`, `failure`, or `skipped`. A successful result is added to the Attack
 Path Decision Engine as an authenticated RDP remote-service opportunity mapped
-to MITRE ATT&CK T1021.001. Missing FreeRDP support, timeouts, and transport or
+to MITRE ATT&CK T1021.001. Missing NetExec RDP support, timeouts, and transport or
 protocol errors are reported as skipped/inconclusive rather than as bad
 credentials.
 

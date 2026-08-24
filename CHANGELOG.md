@@ -49,18 +49,14 @@ All notable changes to this repository will be documented in this file.
 
 ### Added
 
-- Added non-interactive FreeRDP `/auth-only` credential validation when TCP/3389
-  is open and explicit credentials are supplied, with success/failure/skipped
-  summary state and an authenticated remote-service attack path mapped to MITRE
-  ATT&CK T1021.001.
+- Added bounded NetExec (`nxc rdp`/`netexec rdp`) credential validation when
+  TCP/3389 is open and explicit credentials are supplied. The single-target
+  command is recorded in command artifacts, the summary reports
+  success/failure/skipped state, and successful authentication is mapped to
+  MITRE ATT&CK T1021.001 in the attack-path engine.
 
 ### Fixed
 
-- Fixed FreeRDP 3 auth-only detection and invocation to use `+auth-only`, while
-  retaining compatibility with clients that advertise the legacy `/auth-only`
-  spelling.
-- Added a bounded NetExec (`nxc`/`netexec`) RDP authentication fallback when a
-  compatible FreeRDP auth-only provider is unavailable.
 - Added automatic NetBIOS node-status discovery with `nmblookup` and `nbtscan`
   fallback parsing for the target name, workgroup/domain, and reported MAC.
 - Added SecLists-aware FFUF web-content enumeration with
