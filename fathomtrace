@@ -219,6 +219,7 @@ RDP_PORT_OPEN=false
 RDP_AUTH_OK=false
 RDP_AUTH_STATUS="skipped"
 RDP_AUTH_REASON="TCP/3389 is not open"
+RDP_AUTH_PROVIDER="none"
 SSH_DETECTED=false
 ASREP_OK=false
 KERBEROS_AUTH_OK=false
@@ -6996,7 +6997,7 @@ attack_path_evaluation() {
     if sps_rdp_authenticated_remote_service; then
         ATTACK_PATHS+=("Authenticated RDP remote-service opportunity (MITRE ATT&CK T1021.001)")
         critical "Attack Path: Authenticated RDP remote-service opportunity (MITRE ATT&CK T1021.001)"
-        note "Evidence: non-interactive FreeRDP /auth-only NLA authentication succeeded for $AUTH_USER on $TARGET_IPV4:3389"
+        note "Evidence: non-interactive ${RDP_AUTH_PROVIDER:-RDP provider} credential validation succeeded for $AUTH_USER on $TARGET_IPV4:3389"
         lightbulb "Next step: confirm Remote Desktop logon rights and authorization before starting an interactive RDP session."
         echo
     fi
