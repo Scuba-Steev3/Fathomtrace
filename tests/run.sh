@@ -166,6 +166,7 @@ assert_not_contains "$CLI_STDOUT" "Authorized Recon" "CSV stdout has no banner"
 run_cli no-color 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --ascii --ports 80
 assert_eq 0 "$CLI_RC" "no-color dry run succeeds"
 assert_not_contains "$CLI_STDOUT" $'\033[' "no-color removes ANSI sequences"
+assert_contains "$CLI_STDOUT" "Fathomtrace v2.0.0" "text startup banner includes the application version"
 assert_contains "$CLI_STDOUT" "[*] Validating target" "ASCII information icon is used"
 
 run_cli force-color 127.0.0.1 --dry-run --no-loot --skip-preflight --color always --ascii --ports 80
@@ -196,6 +197,24 @@ assert_contains "$CLI_STDERR" "[debug] Optional preflight disabled" "debug mode 
 run_cli quiet 127.0.0.1 --dry-run --no-loot --skip-preflight --quiet --ascii --no-color --ports 80
 assert_eq 0 "$CLI_RC" "quiet dry run succeeds"
 [[ ! -s "$CLI_STDOUT" ]] && pass "quiet mode suppresses stdout" || fail "quiet mode suppresses stdout"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/output.sh"
+    printf 'left\0right\033[31mred\033[0m\n' | sps_clean_tool_stream > "$TEST_TMP/clean-tool-stream"
+    if sps_tool_field_true 'SMBv1:False) (signing:True)' SMBv1; then
+        printf 'true\n' > "$TEST_TMP/smbv1-field"
+    else
+        printf 'false\n' > "$TEST_TMP/smbv1-field"
+    fi
+    if sps_tool_field_true 'SMBv1:False) (signing:True)' signing; then
+        printf 'true\n' > "$TEST_TMP/signing-field"
+    else
+        printf 'false\n' > "$TEST_TMP/signing-field"
+    fi
+)
+assert_eq "leftrightred" "$(cat "$TEST_TMP/clean-tool-stream")" "tool output sanitizer removes NUL and ANSI bytes"
+assert_eq "false" "$(cat "$TEST_TMP/smbv1-field")" "SMBv1 parser does not borrow a later true field"
+assert_eq "true" "$(cat "$TEST_TMP/signing-field")" "SMB signing true field is detected exactly"
 
 # Unit-test the deterministic scan worker without making network connections.
 (
@@ -464,6 +483,40 @@ PATH="$RPC_FAKE_BIN:$PATH" \
 assert_eq 0 "$?" "unknown rpcdump UUID does not abort the scan"
 assert_contains "$TEST_TMP/rpc-unknown-uuid.stdout" "Anonymous MSRPC enumeration successful" "rpcdump fixture reaches UUID parsing"
 assert_not_contains "$TEST_TMP/rpc-unknown-uuid.stderr" "unbound variable" "unknown rpcdump UUID is ignored under nounset"
+
+# A bounded anonymous FTP probe may time out on a reachable but unresponsive
+# service. The optional probe must report that result without aborting the scan.
+FTP_FAKE_BIN="$TEST_TMP/ftp-fake-bin"
+mkdir -p "$FTP_FAKE_BIN"
+cat > "$FTP_FAKE_BIN/timeout" <<'EOF'
+#!/usr/bin/env bash
+shift
+if [[ "${1:-}" == bash && "${2:-}" == -c ]]; then
+    exit 0
+fi
+if [[ "${1:-}" == ftp ]]; then
+    exit 124
+fi
+exec "$@"
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FTP_FAKE_BIN/ftp"
+cat > "$FTP_FAKE_BIN/nxc" <<'EOF'
+#!/usr/bin/env bash
+printf '\0FTP 127.0.0.1 21 127.0.0.1 [+] anonymous:anonymous\0\n'
+EOF
+chmod +x "$FTP_FAKE_BIN/timeout" "$FTP_FAKE_BIN/ftp" "$FTP_FAKE_BIN/nxc"
+PATH="$FTP_FAKE_BIN:$PATH" \
+    "$SCRIPT" 127.0.0.1 --ports 21 --connect-timeout .1 \
+    --no-loot --skip-preflight --no-color --ascii \
+    > "$TEST_TMP/ftp-timeout.stdout" 2> "$TEST_TMP/ftp-timeout.stderr"
+assert_eq 0 "$?" "anonymous FTP timeout does not abort the scan"
+assert_contains "$TEST_TMP/ftp-timeout.stderr" "Anonymous FTP check timed out after 5 seconds" "anonymous FTP timeout is explained"
+assert_contains "$TEST_TMP/ftp-timeout.stdout" "Testing anonymous FTP with NetExec (nxc)" "native FTP timeout falls back to the maintained NetExec CLI"
+assert_contains "$TEST_TMP/ftp-timeout.stdout" "-u anonymous -p ''" "NetExec anonymous FTP fallback uses an empty password"
+assert_contains "$TEST_TMP/ftp-timeout.stderr" "Anonymous FTP login allowed (confirmed by NetExec)" "NetExec anonymous FTP success is classified"
+assert_not_contains "$TEST_TMP/ftp-timeout.stderr" "ignored null byte" "NetExec NUL bytes are removed before Bash capture"
+assert_contains "$TEST_TMP/ftp-timeout.stdout" "Scan completed" "scan continues after anonymous FTP timeout"
+assert_not_contains "$TEST_TMP/ftp-timeout.stderr" "Scan failed with exit code 124" "FTP timeout is not promoted to a scan failure"
 
 # A selected but irrelevant module must not initialize or execute when its ports
 # and prerequisites were not discovered.

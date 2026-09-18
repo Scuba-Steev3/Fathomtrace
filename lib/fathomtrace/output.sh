@@ -127,6 +127,22 @@ sps_redact_file() {
     done < "$source"
 }
 
+sps_clean_tool_stream() {
+    # Some Python-based security tools emit NUL bytes and ANSI control
+    # sequences even when their output is redirected. Remove both before the
+    # stream enters a Bash command substitution: Bash cannot store NUL bytes
+    # and otherwise prints "ignored null byte in input" for every capture.
+    LC_ALL=C tr -d '\000' |
+        sed -E $'s/\033\\[[0-9;]*[[:alpha:]]//g'
+}
+
+sps_tool_field_true() {
+    local output="$1"
+    local field="$2"
+    [[ "$field" =~ ^[A-Za-z0-9_]+$ ]] || return 2
+    grep -Eiq "(^|[[:space:](])${field}:[[:space:]]*true([[:space:])]|$)" <<< "$output"
+}
+
 sps_emit() {
     local level="$1"
     shift
@@ -223,6 +239,7 @@ EOF
 sps_print_banner() {
     [[ "${QUIET:-false}" == true || "${OUTPUT_FORMAT:-text}" != "text" ]] && return 0
     sps_section "Authorized Recon and Service Enumeration"
+    printf '  Fathomtrace v%s\n' "${SPS_VERSION:-unknown}"
     printf '  Use only in authorized environments. Intrusive modules remain opt-in.\n'
 }
 

@@ -47,6 +47,17 @@ sps_command_available() {
     return 1
 }
 
+sps_netexec_command() {
+    local candidate
+    for candidate in nxc netexec; do
+        if sps_command_available "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 sps_validate_runtime() {
     local command_name
     local -a missing=()

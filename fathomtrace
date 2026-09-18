@@ -858,6 +858,7 @@ cme_enum_users() {
     local AUTH_LABEL="$1"
     local CME_ARGS="$2"
     local FOUND_DESC=0
+    local cme_rc=0
 
     command -v crackmapexec >/dev/null 2>&1 || return 1
 
@@ -865,8 +866,15 @@ cme_enum_users() {
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
     echo -e "        ${GREEN}$(sps_redact "crackmapexec smb $TARGET_IPV4 $CME_ARGS --users")${RESET}"
 
-    # Capture full CME output (stdout + stderr)
-    RAW_CME=$(crackmapexec smb "$TARGET_IPV4" $CME_ARGS --users 2>&1)
+    # Remove NUL/control bytes before output enters Bash variables.
+    if RAW_CME=$(
+        crackmapexec smb "$TARGET_IPV4" $CME_ARGS --users 2>&1 |
+            sps_clean_tool_stream
+    ); then
+        cme_rc=0
+    else
+        cme_rc=$?
+    fi
 
     # --- 1. Hard failure: no auth at all ---
     if echo "$RAW_CME" | grep -qiE '\[-\].*(STATUS_LOGON_FAILURE|NT_STATUS_LOGON_FAILURE|ACCESS_DENIED)'; then
@@ -876,9 +884,15 @@ cme_enum_users() {
 
     # --- 2. Auth success but enumeration explicitly denied ---
     if echo "$RAW_CME" | grep -qiE 'Error enumerating domain users|NTLM needs domain\\\\username'; then
-        notify "SMB authentication successful ($AUTH_LABEL), but user enumeration is not permitted"
+        note "SMB authentication succeeded ($AUTH_LABEL), but user enumeration is not permitted"
         SMB_AUTH_OK=true
         return 0
+    fi
+
+    if [[ "$cme_rc" -ne 0 ]] && ! grep -q '\[+\]' <<< "$RAW_CME"; then
+        warn "CrackMapExec user enumeration failed ($AUTH_LABEL, status $cme_rc)"
+        debug "CrackMapExec output: ${RAW_CME:-<none>}"
+        return 1
     fi
 
     # --- 3. Parse enumerated users ONLY ---
@@ -911,7 +925,7 @@ cme_enum_users() {
 
     # --- 4. No users parsed (but no explicit failure) ---
     if [[ -z "$OUTPUT" ]]; then
-        notify "SMB authentication successful ($AUTH_LABEL), but no domain users were returned"
+        note "SMB authentication succeeded ($AUTH_LABEL), but no domain users were returned"
         return 0
     fi
 
@@ -957,7 +971,10 @@ nxc_enum_users() {
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
     echo -e "        ${GREEN}$(sps_redact "netexec smb $TARGET_IPV4 $NXC_ARGS --users")${RESET}"
 
-    RAW_OUT=$(netexec smb "$TARGET_IPV4" $NXC_ARGS --users 2>&1)
+    RAW_OUT=$(
+        netexec smb "$TARGET_IPV4" $NXC_ARGS --users 2>&1 |
+            sps_clean_tool_stream
+    )
 
     # --- 1. Hard authentication failure ---
     if echo "$RAW_OUT" | grep -qiE 'STATUS_LOGON_FAILURE|ACCESS_DENIED|KDC_ERR|LOGON_FAILURE'; then
@@ -967,7 +984,7 @@ nxc_enum_users() {
 
     # --- 2. Auth OK but enumeration not allowed ---
     if echo "$RAW_OUT" | grep -qiE 'Error enumerating|not permitted'; then
-        notify "SMB authentication successful ($AUTH_LABEL), but user enumeration is restricted"
+        note "SMB authentication succeeded ($AUTH_LABEL), but user enumeration is restricted"
         SMB_AUTH_OK=true
         return 0
     fi
@@ -993,7 +1010,7 @@ nxc_enum_users() {
 
     # --- 4. No users parsed ---
     if [[ -z "$USERS" ]]; then
-        notify "SMB authentication successful ($AUTH_LABEL), but no users returned"
+        note "SMB authentication succeeded ($AUTH_LABEL), but no users were returned"
         return 0
     fi
 
@@ -3276,28 +3293,86 @@ kerberos_enum_users() {
     KERB_ENUM_DONE=true
 }
 
+ftp_anonymous_netexec_check() {
+    local target="$1"
+    local tool=""
+    local output=""
+    local ftp_rc=0
+
+    if ! tool="$(sps_netexec_command)"; then
+        debug "NetExec unavailable; anonymous FTP fallback skipped"
+        return 0
+    fi
+
+    info "Testing anonymous FTP with NetExec (${tool})"
+    echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
+    echo -e "        ${GREEN}${tool} ftp '$target' -u anonymous -p ''${RESET}"
+    record_command_argv "FTP" "Anonymous authentication via NetExec" \
+        "$tool" ftp "$target" -u anonymous -p ''
+
+    if output=$(
+        timeout 10 "$tool" ftp "$target" -u anonymous -p '' 2>&1 |
+            sps_clean_tool_stream
+    ); then
+        ftp_rc=0
+    else
+        ftp_rc=$?
+    fi
+
+    if grep -qiE '\[\+\][[:space:]]+anonymous:' <<< "$output"; then
+        critical "Anonymous FTP login allowed (confirmed by NetExec)"
+        FTP_ANON_OK=true
+        return 0
+    fi
+
+    if [[ "$ftp_rc" -eq 124 ]]; then
+        warn "NetExec anonymous FTP check timed out after 10 seconds"
+    elif grep -qiE '\[-\]|authentication failed|login failed|530' <<< "$output"; then
+        note "NetExec confirmed that anonymous FTP login was rejected"
+    elif [[ "$ftp_rc" -ne 0 ]]; then
+        warn "NetExec anonymous FTP check failed with status $ftp_rc"
+        debug "NetExec FTP output: ${output:-<none>}"
+    else
+        warn "NetExec anonymous FTP result was inconclusive"
+        debug "NetExec FTP output: ${output:-<none>}"
+    fi
+
+    return 0
+}
+
 ftp_auth_check() {
     local target="$1"
     local user="$2"
     local pass="$3"
+    local tool=""
+    local ftp_rc=0
 
-    command -v netexec >/dev/null 2>&1 || {
-        warn "netexec not installed — skipping authenticated FTP check"
+    if ! tool="$(sps_netexec_command)"; then
+        warn "NetExec not installed — skipping authenticated FTP check"
         return
-    }
+    fi
 
-    info "Attempting authenticated FTP login (netexec)"
+    info "Attempting authenticated FTP login with NetExec (${tool})"
 
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-    echo -e "        ${GREEN}netexec ftp $TARGET_IPV4 -u '$user' -p '$(sps_secret_value "$pass")'${RESET}"
+    echo -e "        ${GREEN}${tool} ftp '$target' -u '$user' -p '$(sps_secret_value "$pass")'${RESET}"
+    record_command_argv "FTP" "Authenticated login via NetExec" \
+        "$tool" ftp "$target" -u "$user" -p "$pass"
 
-    FTP_OUT=$(timeout 8 netexec ftp "$TARGET_IPV4" -u "$user" -p "$pass" 2>&1)
+    if FTP_OUT=$(
+        timeout 8 "$tool" ftp "$target" -u "$user" -p "$pass" 2>&1 |
+            sps_clean_tool_stream
+    ); then
+        ftp_rc=0
+    else
+        ftp_rc=$?
+    fi
 
     # --- SUCCESS ---
     # netexec success indicators:
     #   [+] Login successful
     #   [+] <user>:<pass>
-    if echo "$FTP_OUT" | grep -qiE '\[\+\].*(Login successful|'"$user"':'"$pass"')'; then
+    if grep -qE '\[\+\]' <<< "$FTP_OUT"; then
         critical "FTP authentication successful for $user; password is redacted"
         FTP_AUTH_OK=true
         printf '[LOOT] FTP AUTH %s %s:%s\n' "$TARGET_IPV4" "$user" "$pass" >> ftp_valid_creds.txt
@@ -3307,19 +3382,24 @@ ftp_auth_check() {
     fi
 
     # --- EXPLICIT FAILURE ---
-    if echo "$FTP_OUT" | grep -qiE 'authentication failed|login failed|530'; then
+    if grep -qiE '\[-\]|authentication failed|login failed|530' <<< "$FTP_OUT"; then
         notify "FTP authentication failed for $user"
         return 
     fi
 
+    if [[ "$ftp_rc" -eq 124 ]]; then
+        warn "Authenticated FTP check timed out after 8 seconds"
+        return
+    fi
+
     # --- SERVICE PRESENT BUT RESULT UNCLEAR ---
-    if echo "$FTP_OUT" | grep -qiE 'ftp.*open|connected'; then
+    if grep -qiE 'ftp.*open|connected|banner:' <<< "$FTP_OUT"; then
         notify "FTP reachable, but authentication result unclear"
         return 
     fi
 
     # --- HARD FAILURE ---
-    warn "FTP authentication check failed (no valid response)"
+    warn "FTP authentication check failed (NetExec exited with status $ftp_rc and returned no valid response)"
     return 
 }
 
@@ -3908,8 +3988,11 @@ parse_rpcdump_and_map_attacks() {
 }
 
 check_rpc_services() {
-    set +e  # Disable exit-on-error for this function
     local target="$1"
+    local errexit_was_set=false
+
+    [[ $- == *e* ]] && errexit_was_set=true
+    set +e
 
     # ------------------------------
     # 1. Anonymous MSRPC via rpcdump.py
@@ -3925,7 +4008,7 @@ check_rpc_services() {
                 MSRPC_ANON_OK=true
 		parse_rpcdump_and_map_attacks "$target"
             else
-                warn "Anonymous MSRPC enumeration failed"
+                note "Anonymous MSRPC enumeration was not permitted"
                 MSRPC_ANON_OK=false
             fi
         fi
@@ -3942,7 +4025,7 @@ check_rpc_services() {
                 critical "Anonymous SMB RPC login successful!"
                 RPC_ANON_OK=true
             else
-                warn "Anonymous SMB RPC login failed"
+                note "Anonymous SMB RPC access was rejected"
                 RPC_ANON_OK=false
             fi
             else
@@ -3955,7 +4038,7 @@ check_rpc_services() {
                 critical "Guest SMB RPC login successful!"
                 RPC_GUEST_OK=true
             else
-                warn "Guest SMB RPC login failed"
+                note "Guest SMB RPC access was rejected"
                 RPC_GUEST_OK=false
             fi
             else
@@ -3977,6 +4060,8 @@ check_rpc_services() {
             RPC_AUTH_OK=false
         fi
     fi
+
+    [[ "$errexit_was_set" == true ]] && set -e
 }
 
 #SMB_V1=false
@@ -4014,56 +4099,81 @@ check_smb_protocols() {
 
 
 check_ntlm_support() {
-    set +e  # Disable exit-on-error for this function
-    local TARGET_IP=$1
+    local target_ip="$1"
+    local tool=""
+    local tool_name=""
+    local tool_out=""
+    local auth_out=""
+    local metadata_rc=0
+    local auth_rc=0
 
     SMB_SIGNING=false
 
-    # Pick tool: prefer CME, fall back to NXC
-    if command -v nxc >/dev/null 2>&1; then
-        TOOL="nxc"
-        TOOL_NAME="NXC"
+    # Prefer the maintained NetExec CLI; retain CME compatibility.
+    if tool="$(sps_netexec_command)"; then
+        tool_name="NetExec ($tool)"
     elif command -v crackmapexec >/dev/null 2>&1; then
-        TOOL="crackmapexec"
-        TOOL_NAME="CME"
+        tool="crackmapexec"
+        tool_name="CrackMapExec"
     else
         warn "Neither crackmapexec nor netexec found — skipping NTLM check"
         return 1
     fi
 
-    info "Checking SMB signing and NTLM support via $TOOL_NAME"
+    info "Checking SMB signing and NTLM support via $tool_name"
 
-    TOOL_OUT=$("$TOOL" smb "$TARGET_IP" 2>/dev/null)
+    if tool_out=$(
+        "$tool" smb "$target_ip" 2>&1 |
+            sps_clean_tool_stream
+    ); then
+        metadata_rc=0
+    else
+        metadata_rc=$?
+    fi
 
-    if echo "$TOOL_OUT" | grep -q "signing:.*True"; then
+    if sps_tool_field_true "$tool_out" signing; then
         info "SMB Signing is enforced"
         SMB_SIGNING=true
     else
         notify "SMB Signing is NOT enforced!"
     fi
 
-    if echo "$TOOL_OUT" | grep -q "SMBv1:.*True"; then
+    if sps_tool_field_true "$tool_out" SMBv1; then
         notify "SMBv1 is ENABLED (insecure)!"
         SMB_V1=true
     fi
 
-    echo
-    info "Testing NTLM support via guest login using $TOOL_NAME"
-    OUT=$("$TOOL" smb "$TARGET_IP" -u "guest" -p "" 2>/dev/null)
+    if [[ "$metadata_rc" -ne 0 && -z "$tool_out" ]]; then
+        warn "$tool_name SMB metadata check failed with status $metadata_rc"
+    fi
 
-    if echo "$OUT" | grep -q "STATUS_NOT_SUPPORTED"; then
+    echo
+    info "Testing NTLM support via guest login using $tool_name"
+    if auth_out=$(
+        "$tool" smb "$target_ip" -u guest -p "" 2>&1 |
+            sps_clean_tool_stream
+    ); then
+        auth_rc=0
+    else
+        auth_rc=$?
+    fi
+
+    if grep -q "STATUS_NOT_SUPPORTED" <<< "$auth_out"; then
         notify "NTLM authentication appears to be DISABLED (STATUS_NOT_SUPPORTED)"
-		NTLM_ENABLED=false
-        print_ntlm_kerberos_time_sync_note "$TARGET_IP"
-    elif echo "$OUT" | grep -q "\[-\]"; then
-        notify "NTLM authentication attempted, but failed — NTLM likely ENABLED"
+        NTLM_ENABLED=false
+        print_ntlm_kerberos_time_sync_note "$target_ip"
+    elif grep -q "\[-\]" <<< "$auth_out"; then
+        note "Guest credentials were rejected; the NTLM authentication exchange is enabled"
         NTLM_ENABLED=true
-    elif echo "$OUT" | grep -q "\[+\]"; then
+    elif grep -q "\[+\]" <<< "$auth_out"; then
         critical "NTLM authentication SUCCESSFUL — NTLM is ENABLED!"
         NTLM_ENABLED=true
     else
-        warn "NTLM test inconclusive — unknown response"
+        warn "NTLM test inconclusive (tool status $auth_rc)"
+        debug "$tool_name output: ${auth_out:-<none>}"
     fi
+
+    return 0
 }
 
 get_domain_sid() {
@@ -5406,17 +5516,28 @@ if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "21"; then
 
     # --- Anonymous check ---
     if [[ "$SKIP_NULL_CHECKS" != true ]] && sps_command_available ftp; then
-        FTP_OUT_1=$(
-            printf 'user anonymous anonymous\nquit\n' \
+        FTP_ANON_RC=0
+        if FTP_OUT_1=$(
+            printf 'user anonymous\n\nquit\n' \
                 | timeout 5 ftp -inv "$TARGET_IPV4" 2>&1 \
                 | tr -d '\r'
-        )
+        ); then
+            FTP_ANON_RC=0
+        else
+            FTP_ANON_RC=$?
+        fi
+
         if printf '%s\n' "$FTP_OUT_1" | grep -qi '^230'; then
             critical "Anonymous FTP login allowed"
             echo -e "        ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
             echo -e "           ${GREEN}ftp anonymous@$TARGET_IPV4${RESET}"
             record_command_argv "FTP" "Anonymous discovery" ftp "anonymous@$TARGET_IPV4"
             FTP_ANON_OK=true
+        elif [[ "$FTP_ANON_RC" -eq 124 ]]; then
+            warn "Anonymous FTP check timed out after 5 seconds"
+        elif [[ "$FTP_ANON_RC" -ne 0 ]]; then
+            warn "Anonymous FTP check could not be completed (ftp exited with status $FTP_ANON_RC)"
+            debug "FTP client output: ${FTP_OUT_1:-<none>}"
         else
             notify "Anonymous FTP login not permitted"
         fi
@@ -5424,6 +5545,13 @@ if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "21"; then
         debug "Anonymous FTP check skipped by --skip-null-checks"
     else
         debug "FTP client unavailable; anonymous FTP check skipped"
+    fi
+
+    # NetExec's maintained CLI is normally exposed as `nxc` on Kali. Use it
+    # as an independent fallback whenever the native FTP client did not
+    # confirm anonymous access.
+    if [[ "$SKIP_NULL_CHECKS" != true && "$FTP_ANON_OK" != true ]]; then
+        ftp_anonymous_netexec_check "$TARGET_IPV4"
     fi
 
     # --- Authenticated check (only if creds provided) ---
@@ -5781,11 +5909,9 @@ if [ -s "$SMB_MARKER" ]; then
     # -------- Auth Attempts (ORDER MATTERS) --------
     # 1) True NULL session
     if [[ "$SKIP_NULL_CHECKS" != true ]] && smb_auth_check "%"; then
-        success "SMB NUll Session successful"
+        success "SMB NULL session successful"
         SMB_NULL_OK=true
-        
-    	smb_enum_smbclient "%" "NULL session" || \
-            notify "NULL Session Allowed, but no shares are visible to this user"
+
         if [[ "$NTLM_ENABLED" = true ]]; then
             smb_enum_smbclient "%" "NULL session" || \
                 notify "NULL Session Allowed, but no shares are visible to this user"
@@ -5872,7 +5998,15 @@ if [ -s "$SMB_MARKER" ]; then
 
         info "Running crackmapexec RID brute (safe enumeration)..."
 
-        RID_OUTPUT=$(crackmapexec smb "$TARGET_IPV4" -u guest -p '' --rid-brute 2>/dev/null)
+        RID_RC=0
+        if RID_OUTPUT=$(
+            crackmapexec smb "$TARGET_IPV4" -u guest -p '' --rid-brute 2>&1 |
+                sps_clean_tool_stream
+        ); then
+            RID_RC=0
+        else
+            RID_RC=$?
+        fi
 
         USERS=$(echo "$RID_OUTPUT" | awk -F'\\\\' '
              /SidTypeUser/ && !/\$/ {
@@ -5880,7 +6014,10 @@ if [ -s "$SMB_MARKER" ]; then
                  print a[1]
              }' | sort -u)
 
-        if [ -n "$USERS" ]; then
+        if [[ "$RID_RC" -ne 0 && -z "$USERS" ]]; then
+            warn "RID brute failed with status $RID_RC"
+            debug "CrackMapExec RID output: ${RID_OUTPUT:-<none>}"
+        elif [ -n "$USERS" ]; then
             # Timestamped users file (always unique)
             DATE_TAG=$(date +"%Y%m%d_%H%M%S")
             USERS_FILE="users_${TARGET_IPV4}_${DATE_TAG}.txt"
@@ -5901,7 +6038,7 @@ if [ -s "$SMB_MARKER" ]; then
             echo "KERBEROS" >> "$HINT_FILE"
             echo "LDAP" >> "$HINT_FILE"
         else
-            notify "RID brute completed, but no users parsed"
+            note "RID brute completed, but no user entries were returned"
         fi
     fi
 
