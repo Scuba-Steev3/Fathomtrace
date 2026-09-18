@@ -481,7 +481,7 @@ PATH="$RPC_FAKE_BIN:$PATH" \
     --no-loot --skip-preflight --no-color --ascii \
     > "$TEST_TMP/rpc-unknown-uuid.stdout" 2> "$TEST_TMP/rpc-unknown-uuid.stderr"
 assert_eq 0 "$?" "unknown rpcdump UUID does not abort the scan"
-assert_contains "$TEST_TMP/rpc-unknown-uuid.stdout" "Anonymous MSRPC enumeration successful" "rpcdump fixture reaches UUID parsing"
+assert_contains "$TEST_TMP/rpc-unknown-uuid.stderr" "Anonymous MSRPC enumeration successful" "rpcdump fixture reaches UUID parsing"
 assert_not_contains "$TEST_TMP/rpc-unknown-uuid.stderr" "unbound variable" "unknown rpcdump UUID is ignored under nounset"
 
 # A bounded anonymous FTP probe may time out on a reachable but unresponsive
