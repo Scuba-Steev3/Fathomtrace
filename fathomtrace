@@ -129,6 +129,8 @@ source "$FATHOMTRACE_LIB_DIR/loot.sh"
 source "$FATHOMTRACE_LIB_DIR/scan.sh"
 source "$FATHOMTRACE_LIB_DIR/netbios.sh"
 source "$FATHOMTRACE_LIB_DIR/rdp.sh"
+source "$FATHOMTRACE_LIB_DIR/smb.sh"
+source "$FATHOMTRACE_LIB_DIR/ldap.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -876,60 +878,35 @@ cme_enum_users() {
         cme_rc=$?
     fi
 
-    # --- 1. Hard failure: no auth at all ---
-    if echo "$RAW_CME" | grep -qiE '\[-\].*(STATUS_LOGON_FAILURE|NT_STATUS_LOGON_FAILURE|ACCESS_DENIED)'; then
-        warn "SMB authentication failed ($AUTH_LABEL)"
-        return 1
-    fi
+    # Parse the complete output before interpreting earlier errors. CME can fail
+    # domain enumeration, fall back to SAMRPC, and still return valid users.
+    OUTPUT="$(sps_parse_cme_users <<< "$RAW_CME")"
+    local enum_outcome
+    enum_outcome="$(sps_classify_cme_user_enum "$RAW_CME" "$cme_rc" "$OUTPUT")"
 
-    # --- 2. Auth success but enumeration explicitly denied ---
-    if echo "$RAW_CME" | grep -qiE 'Error enumerating domain users|NTLM needs domain\\\\username'; then
-        note "SMB authentication succeeded ($AUTH_LABEL), but user enumeration is not permitted"
-        SMB_AUTH_OK=true
-        return 0
-    fi
+    case "$enum_outcome" in
+        enumerated)
+            ;;
+        auth_failed)
+            warn "SMB authentication failed ($AUTH_LABEL)"
+            return 1
+            ;;
+        enumeration_denied)
+            note "SMB authentication succeeded ($AUTH_LABEL), but user enumeration is not permitted"
+            SMB_AUTH_OK=true
+            return 0
+            ;;
+        command_failed)
+            warn "CrackMapExec user enumeration failed ($AUTH_LABEL, status $cme_rc)"
+            debug "CrackMapExec output: ${RAW_CME:-<none>}"
+            return 1
+            ;;
+        no_users)
+            note "SMB authentication succeeded ($AUTH_LABEL), but no domain users were returned"
+            return 0
+            ;;
+    esac
 
-    if [[ "$cme_rc" -ne 0 ]] && ! grep -q '\[+\]' <<< "$RAW_CME"; then
-        warn "CrackMapExec user enumeration failed ($AUTH_LABEL, status $cme_rc)"
-        debug "CrackMapExec output: ${RAW_CME:-<none>}"
-        return 1
-    fi
-
-    # --- 3. Parse enumerated users ONLY ---
-    OUTPUT=$(echo "$RAW_CME" | awk '
-        /^[A-Z]+[[:space:]]+[0-9.]+/ {
-            user=""
-            desc=""
-
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /\\/) {
-                    split($i,a,"\\")
-                    user=a[2]
-                }
-            }
-
-            # Skip self-echo or empty results
-            if (user == "" || tolower(user) == "guest") next
-
-            # Capture description if present
-            match($0, /desc:[[:space:]]*(.*)$/, d)
-            if (d[1] != "") {
-                desc=d[1]
-            }
-
-            if (user != "") {
-                print user "|" desc
-            }
-        }
-    ' | sort -u)
-
-    # --- 4. No users parsed (but no explicit failure) ---
-    if [[ -z "$OUTPUT" ]]; then
-        note "SMB authentication succeeded ($AUTH_LABEL), but no domain users were returned"
-        return 0
-    fi
-
-    # --- 5. Enumeration succeeded ---
     high_risk "SMB user enumeration successful ($AUTH_LABEL)"
     SMB_AUTH_OK=true
     echo -e "    ${YELLOW}Users Discovered:${RESET}"
@@ -2561,11 +2538,12 @@ check_badsuccessor() {
   local -a cmd=()
   local -a display_cmd=()
 
-  #BADSUCCESSOR_CHECK_DONE=true
-  #BADSUCCESSOR_DC_2025=false
-  #BADSUCCESSOR_CANDIDATES_FOUND=false
-  #BADSUCCESSOR_APPLICABLE=false
-  #BADSUCCESSOR_APPLICABLE_TRUSTEES=()
+  # Reset per-run state before either NetExec LDAP request is attempted.
+  BADSUCCESSOR_CHECK_DONE=false
+  BADSUCCESSOR_DC_2025=false
+  BADSUCCESSOR_CANDIDATES_FOUND=false
+  BADSUCCESSOR_APPLICABLE=false
+  BADSUCCESSOR_APPLICABLE_TRUSTEES=()
 
   dc_target="${TARGET_IPV4:-$TARGET}"
 
@@ -2680,58 +2658,7 @@ check_badsuccessor() {
 
   records=$(
     printf '%s\n' "$clean_output" |
-      awk '
-        function flush_record() {
-          if (dn != "" || hostname != "" || os != "" || version != "") {
-            print dn "|" hostname "|" os "|" version
-          }
-
-          dn=""
-          hostname=""
-          os=""
-          version=""
-        }
-
-        /Response for object:/ {
-          flush_record()
-
-          dn=$0
-          sub(/^.*Response for object:[[:space:]]*/, "", dn)
-          next
-        }
-
-        {
-          line=$0
-
-          sub(
-            /^[[:space:]]*LDAP[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/,
-            "",
-            line
-          )
-
-          if (line ~ /^operatingSystemVersion[[:space:]]+/) {
-            sub(/^operatingSystemVersion[[:space:]]+/, "", line)
-            version=line
-            next
-          }
-
-          if (line ~ /^operatingSystem[[:space:]]+/) {
-            sub(/^operatingSystem[[:space:]]+/, "", line)
-            os=line
-            next
-          }
-
-          if (line ~ /^dNSHostName[[:space:]]+/) {
-            sub(/^dNSHostName[[:space:]]+/, "", line)
-            hostname=line
-            next
-          }
-        }
-
-        END {
-          flush_record()
-        }
-      '
+      sps_parse_netexec_dc_os
   )
 
   if [[ -z "$records" ]]; then
@@ -2853,6 +2780,10 @@ check_badsuccessor() {
 
     return "$rc"
   fi
+
+  # A completed module run is a valid assessment even when it reports that
+  # no Server 2025 domain controller exists.
+  BADSUCCESSOR_CHECK_DONE=true
 
   if grep -q \
     'Found domain controller with operating system Windows Server 2025' \
@@ -7122,6 +7053,8 @@ generate_synopsis
 # Attack Path Decision Engine
 ########################################
 attack_path_evaluation() {
+    local dc_2025=false
+
     echo -e "\n${BLUE}========================================${RESET}"
     echo -e "${BYELLOW}    Attack Path Decision Engine        ${RESET}"
     echo -e "${BLUE}========================================${RESET}"
@@ -7240,6 +7173,8 @@ attack_path_evaluation() {
         critical "Attack Path: AS-REP Roasting Possible (User hashes obtainable)"
         lightbulb "Next Steps:"
         echo "   - Request AS-REP hashes (GetNPUsers.py / netexec / crackmapexec ldap $TARGET_IPV4 -u username -p 'password' --asreproast output.txt)"
+        echo "   - Or run John on AS-REP Account Output:"
+        echo "         john --wordlist=/usr/share/wordlists/rockyou.txt --format=krb5asrep asrep_hashes_$TARGET_IPV4.txt"
         echo "   - Crack hashes offline (hashcat mode 18200)"
         echo "   - Re-test LDAP/SMB/WinRM with cracked creds"
         echo
@@ -7277,7 +7212,7 @@ attack_path_evaluation() {
         echo
         info "Evaluating BadSuccessor/dMSA findings"
 
-        if [[ "$dc_2025" == true && "${BADSUCCESSOR_CANDIDATES_FOUND:-false}" == true && "${BADSUCCESSOR_APPLICABLE:-false}" == true ]]; then
+        if [[ "${dc_2025:-false}" == true && "${BADSUCCESSOR_CANDIDATES_FOUND:-false}" == true && "${BADSUCCESSOR_APPLICABLE:-false}" == true ]]; then
             ATTACK_PATHS+=(
                 "BadSuccessor/dMSA OU Permission Abuse Candidate"
             )
@@ -7318,10 +7253,15 @@ attack_path_evaluation() {
                 note "Evidence: ${BADSUCCESSOR_EVIDENCE}"
             fi
 
-        elif [[ "${BADSUCCESSOR_APPLICABLE:-false}" == true && "$dc_2025" != true ]]; then
-            notify "A BadSuccessor trustee matched, but Server 2025 DC evidence is missing"
-            note "Treat the finding as incomplete until the DC operating-system version is verified"
-        elif [[ "$dc_2025" == true ]]; then
+        elif [[ "${BADSUCCESSOR_APPLICABLE:-false}" == true && "${dc_2025:-false}" != true ]]; then
+            if [[ "${DC_VERSION_FOUND:-false}" == true || "${BADSUCCESSOR_CHECK_DONE:-false}" == true ]]; then
+                notify "A BadSuccessor trustee matched, but no Server 2025 domain controller was identified"
+                note "The required Server 2025 prerequisite is absent; no BadSuccessor attack path was added"
+            else
+                notify "A BadSuccessor trustee matched, but Server 2025 DC evidence is missing"
+                note "Treat the finding as incomplete until the DC operating-system version is verified"
+            fi
+        elif [[ "${dc_2025:-false}" == true ]]; then
             success "Server 2025 DC identified, but no applicable BadSuccessor OU-permission finding was reported"
         else
             notify "BadSuccessor assessment completed without a supported attack-path finding"

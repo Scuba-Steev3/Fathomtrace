@@ -115,6 +115,54 @@ assert_contains "$CLI_STDERR" "--jobs must be" "invalid worker count is explaine
 ) > "$TEST_TMP/explicit-jobs.txt"
 assert_contains "$TEST_TMP/explicit-jobs.txt" "37:true" "explicit --jobs is tracked for FFUF"
 
+(
+    TARGET=""
+    source "$ROOT_DIR/lib/fathomtrace/cli.sh"
+    sps_cli_defaults
+    printf '%s\n' "$CONNECT_TIMEOUT"
+) > "$TEST_TMP/default-connect-timeout.txt"
+assert_contains "$TEST_TMP/default-connect-timeout.txt" "0.25" "default port-scanning timeout is 250 ms"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/smb.sh"
+    cme_output='SMB         192.168.78.11   445    WINTERFELL       [-] Error enumerating domain users using dc ip 192.168.78.11: NTLM needs domain\username and a password
+SMB         192.168.78.11   445    WINTERFELL       [*] Trying with SAMRPC protocol
+SMB         192.168.78.11   445    WINTERFELL       [+] Enumerated domain user(s)
+SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\Guest                          Built-in account for guest access to the computer/domain
+SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\arya.stark                     Arya Stark
+SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\sansa.stark                    Sansa Stark'
+    parsed_users="$(sps_parse_cme_users <<< "$cme_output")"
+    printf 'outcome=%s\n%s\n' \
+        "$(sps_classify_cme_user_enum "$cme_output" 1 "$parsed_users")" \
+        "$parsed_users"
+) > "$TEST_TMP/cme-samrpc-fallback.txt"
+assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "outcome=enumerated" "CME SAMRPC fallback overrides the initial domain-enumeration error"
+assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "Guest|Built-in account" "CME parser preserves Guest as an enumerated account"
+assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "arya.stark|Arya Stark" "CME parser preserves enumerated domain users"
+assert_not_contains "$TEST_TMP/cme-samrpc-fallback.txt" "username|" "CME parser ignores NTLM domain\\username guidance"
+assert_contains "$SCRIPT" "local dc_2025=false" "BadSuccessor evaluation initializes its Server 2025 state under nounset"
+assert_contains "$SCRIPT" '"${dc_2025:-false}" == true' "BadSuccessor evaluation defensively reads its Server 2025 state"
+assert_contains "$SCRIPT" "BADSUCCESSOR_CHECK_DONE=true" "completed BadSuccessor checks are recorded even without Server 2025"
+assert_contains "$SCRIPT" "The required Server 2025 prerequisite is absent; no BadSuccessor attack path was added" "non-Server-2025 BadSuccessor results are a normal decision outcome"
+assert_contains "$SCRIPT" "--format=krb5asrep asrep_hashes_\$TARGET_IPV4.txt" "AS-REP attack path includes a John cracking command"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/ldap.sh"
+    sps_parse_netexec_dc_os <<'EOF'
+LDAP                     192.168.78.11   389    WINTERFELL       [+] Response for object: CN=WINTERFELL,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local
+LDAP                     192.168.78.11   389    WINTERFELL       operatingSystem      Windows Server 2019 Datacenter Evaluation
+LDAP                     192.168.78.11   389    WINTERFELL       operatingSystemVersion 10.0 (17763)
+LDAP                     192.168.78.11   389    WINTERFELL       dNSHostName          winterfell.north.sevenkingdoms.local
+LDAP                     192.168.78.12   389    CASTLEBLACK      [+] Response for object: CN=CASTLEBLACK,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local
+LDAP                     192.168.78.12   389    CASTLEBLACK      dNSHostName          castleblack.north.sevenkingdoms.local
+LDAP                     192.168.78.12   389    CASTLEBLACK      operatingSystemVersion 10.0 (26100)
+LDAP                     192.168.78.12   389    CASTLEBLACK      operatingSystem      Windows Server 2025 Datacenter
+EOF
+) > "$TEST_TMP/netexec-dc-os.txt"
+assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=WINTERFELL,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|winterfell.north.sevenkingdoms.local|Windows Server 2019 Datacenter Evaluation|10.0 (17763)" "NetExec parser extracts the Server 2019 DC record"
+assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=CASTLEBLACK,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|castleblack.north.sevenkingdoms.local|Windows Server 2025 Datacenter|10.0 (26100)" "NetExec parser handles arbitrary LDAP attribute order and multiple DCs"
+assert_not_contains "$TEST_TMP/netexec-dc-os.txt" "Windows Server 2019 Datacenter Evaluation|Windows Server 2019 Datacenter Evaluation" "NetExec parser does not confuse operatingSystem with operatingSystemVersion"
+
 run_cli invalid-target 999.1.1.1 --dry-run --no-loot --skip-preflight --format json
 assert_eq 3 "$CLI_RC" "invalid target uses target exit code"
 assert_contains "$CLI_STDOUT" '"status":"failed"' "structured errors include status"

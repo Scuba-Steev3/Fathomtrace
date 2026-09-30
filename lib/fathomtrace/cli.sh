@@ -12,7 +12,7 @@ sps_cli_defaults() {
     CUSTOM_PORTS=""
     MAX_JOBS=20
     MAX_JOBS_EXPLICIT=false
-    CONNECT_TIMEOUT=2
+    CONNECT_TIMEOUT=0.25
     RETRY_LIMIT=0
     OUTPUT_FORMAT="text"
     COLOR_MODE="auto"
@@ -464,7 +464,7 @@ Performance options:
       --jobs N                Concurrent TCP probes; default: 20, maximum: 256.
                               When supplied, N also sets FFUF threads; otherwise
                               FFUF defaults to 50 threads.
-      --connect-timeout SEC   Per-attempt TCP timeout; default: 2 seconds.
+      --connect-timeout SEC   Per-attempt TCP timeout; default: 0.25 seconds.
       --retries N             Retry failed TCP probes N times; default: 0,
                               maximum: 10.
 
