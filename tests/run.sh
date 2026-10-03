@@ -125,6 +125,41 @@ assert_contains "$TEST_TMP/default-connect-timeout.txt" "0.25" "default port-sca
 
 (
     source "$ROOT_DIR/lib/fathomtrace/smb.sh"
+    args=()
+    sps_build_netexec_smb_auth_args args hodor hodor NORTH
+    (IFS='|'; printf '%s\n' "${args[*]}")
+) > "$TEST_TMP/netexec-smb-domain-args.txt"
+assert_contains "$TEST_TMP/netexec-smb-domain-args.txt" "-u|hodor|-p|hodor|-d|NORTH" "NetExec SMB authentication passes the supplied domain"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/smb.sh"
+    args=()
+    sps_build_netexec_smb_auth_args args hodor hodor ""
+    (IFS='|'; printf '%s\n' "${args[*]}")
+) > "$TEST_TMP/netexec-smb-no-domain-args.txt"
+assert_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-u|hodor|-p|hodor" "NetExec SMB authentication works without a domain"
+assert_not_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-d" "NetExec SMB authentication omits an empty domain"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/validation.sh"
+    KERBEROS_AUTH_CHECKED=false
+    kerberos_attempts=0
+    kerberos_auth_check() {
+        kerberos_attempts=$((kerberos_attempts + 1))
+        return 1
+    }
+
+    sps_run_optional_kerberos_auth_check
+    first_status=$?
+    sps_run_optional_kerberos_auth_check
+    second_status=$?
+    printf 'first=%s second=%s attempts=%s checked=%s\n' \
+        "$first_status" "$second_status" "$kerberos_attempts" "$KERBEROS_AUTH_CHECKED"
+) > "$TEST_TMP/nonfatal-kerberos-auth.txt"
+assert_contains "$TEST_TMP/nonfatal-kerberos-auth.txt" "first=0 second=0 attempts=1 checked=true" "failed optional Kerberos authentication is non-fatal and is not retried"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/smb.sh"
     cme_output='SMB         192.168.78.11   445    WINTERFELL       [-] Error enumerating domain users using dc ip 192.168.78.11: NTLM needs domain\username and a password
 SMB         192.168.78.11   445    WINTERFELL       [*] Trying with SAMRPC protocol
 SMB         192.168.78.11   445    WINTERFELL       [+] Enumerated domain user(s)
@@ -162,6 +197,27 @@ EOF
 assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=WINTERFELL,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|winterfell.north.sevenkingdoms.local|Windows Server 2019 Datacenter Evaluation|10.0 (17763)" "NetExec parser extracts the Server 2019 DC record"
 assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=CASTLEBLACK,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|castleblack.north.sevenkingdoms.local|Windows Server 2025 Datacenter|10.0 (26100)" "NetExec parser handles arbitrary LDAP attribute order and multiple DCs"
 assert_not_contains "$TEST_TMP/netexec-dc-os.txt" "Windows Server 2019 Datacenter Evaluation|Windows Server 2019 Datacenter Evaluation" "NetExec parser does not confuse operatingSystem with operatingSystemVersion"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/ad_acl.sh"
+    sps_parse_bloodyad_writeowner <<'EOF'
+distinguishedName: CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=north,DC=sevenkingdoms,DC=local
+OWNER: WRITE
+description: Stark Wallpaper Policy
+
+distinguishedName: CN=Unrelated,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+DACL: WRITE
+
+distinguishedName: OU=Workstations,DC=north,DC=sevenkingdoms,DC=local
+Right: WRITE_OWNER
+EOF
+) > "$TEST_TMP/writeowner-findings.txt"
+assert_contains "$TEST_TMP/writeowner-findings.txt" "CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=north,DC=sevenkingdoms,DC=local|GPO|WriteOwner" "WriteOwner parser detects an arbitrary writable GPO"
+assert_contains "$TEST_TMP/writeowner-findings.txt" "OU=Workstations,DC=north,DC=sevenkingdoms,DC=local|OU|WriteOwner" "WriteOwner parser accepts explicit ACL right names"
+assert_not_contains "$TEST_TMP/writeowner-findings.txt" "CN=Unrelated" "WriteOwner parser does not promote DACL-only findings"
+assert_contains "$SCRIPT" "AD-ACL-WRITEOWNER" "WriteOwner findings are recorded in the structured report"
+assert_contains "$SCRIPT" "Active Directory WriteOwner permission abuse candidate" "WriteOwner findings feed the attack-path report"
+assert_contains "$SCRIPT" "SharpGPOAbuse.exe --AddComputerTask" "GPO WriteOwner attack path includes a concise impact-test reminder"
 
 run_cli invalid-target 999.1.1.1 --dry-run --no-loot --skip-preflight --format json
 assert_eq 3 "$CLI_RC" "invalid target uses target exit code"

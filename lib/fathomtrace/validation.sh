@@ -58,6 +58,16 @@ sps_netexec_command() {
     return 1
 }
 
+sps_run_optional_kerberos_auth_check() {
+    if [[ "${KERBEROS_AUTH_CHECKED:-false}" == true ]]; then
+        return 0
+    fi
+
+    KERBEROS_AUTH_CHECKED=true
+    kerberos_auth_check || true
+    return 0
+}
+
 sps_validate_runtime() {
     local command_name
     local -a missing=()

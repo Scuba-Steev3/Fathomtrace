@@ -131,6 +131,7 @@ source "$FATHOMTRACE_LIB_DIR/netbios.sh"
 source "$FATHOMTRACE_LIB_DIR/rdp.sh"
 source "$FATHOMTRACE_LIB_DIR/smb.sh"
 source "$FATHOMTRACE_LIB_DIR/ldap.sh"
+source "$FATHOMTRACE_LIB_DIR/ad_acl.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -225,6 +226,7 @@ RDP_AUTH_PROVIDER="none"
 SSH_DETECTED=false
 ASREP_OK=false
 KERBEROS_AUTH_OK=false
+KERBEROS_AUTH_CHECKED=false
 HAS_WEB=0
 HAS_LDAP=0
 HAS_KERB=0
@@ -264,6 +266,9 @@ DACL_INTERESTING_COUNT=0
 BLOODYAD_AUDIT_DIR=""
 BLOODYAD_WRITABLE_FILE=""
 BLOODYAD_WRITABLE_COUNT=0
+AD_WRITEOWNER_FOUND=false
+AD_WRITEOWNER_FINDINGS_FILE=""
+AD_WRITEOWNER_FINDING_COUNT=0
 RBCD_AUDIT_DONE=false
 RBCD_PARSE_OK=false
 # Candidate ACE exists, but its trustee may not belong to the current user.
@@ -938,18 +943,21 @@ cme_enum_users() {
 
 nxc_enum_users() {
     local AUTH_LABEL="$1"
-    local NXC_ARGS="$2"
+    shift
+    local -a NXC_ARGS=("$@")
     local FOUND_DESC=0
     local RAW_OUT USERS
+    local display_command
 
     command -v netexec >/dev/null 2>&1 || return 1
 
     info "Enumerating SMB users via netexec ($AUTH_LABEL)..."
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-    echo -e "        ${GREEN}$(sps_redact "netexec smb $TARGET_IPV4 $NXC_ARGS --users")${RESET}"
+    display_command="$(sps_shell_join netexec smb "$TARGET_IPV4" "${NXC_ARGS[@]}" --users)"
+    echo -e "        ${GREEN}$(sps_redact "$display_command")${RESET}"
 
     RAW_OUT=$(
-        netexec smb "$TARGET_IPV4" $NXC_ARGS --users 2>&1 |
+        netexec smb "$TARGET_IPV4" "${NXC_ARGS[@]}" --users 2>&1 |
             sps_clean_tool_stream
     )
 
@@ -1258,6 +1266,7 @@ run_bloodyad_writable_audit() {
     local output_file
     local dc_host
     local rc
+    local target_dn object_type right_name
     local -a bad_cmd
 
     if ! command -v bloodyad >/dev/null 2>&1; then
@@ -1283,6 +1292,11 @@ run_bloodyad_writable_audit() {
     date_tag="$(date +'%Y%m%d_%H%M%S')"
     out_dir="bloodyad_${TARGET_IPV4}_${date_tag}"
     output_file="${out_dir}/writable_detailed.txt"
+    BLOODYAD_AUDIT_DIR="$out_dir"
+    BLOODYAD_WRITABLE_FILE="$output_file"
+    AD_WRITEOWNER_FOUND=false
+    AD_WRITEOWNER_FINDING_COUNT=0
+    AD_WRITEOWNER_FINDINGS_FILE="${out_dir}/writeowner_findings.tsv"
 
     mkdir -p "$out_dir"
 
@@ -1348,11 +1362,37 @@ run_bloodyad_writable_audit() {
 
     success "Writable-object audit saved to: ${BLUE}$output_file${RESET}"
 
+    sps_parse_bloodyad_writeowner < "$output_file" > "$AD_WRITEOWNER_FINDINGS_FILE"
+    if [[ -s "$AD_WRITEOWNER_FINDINGS_FILE" ]]; then
+        AD_WRITEOWNER_FINDING_COUNT=$(wc -l < "$AD_WRITEOWNER_FINDINGS_FILE")
+        AD_WRITEOWNER_FOUND=true
+
+        echo
+        high_risk "Effective WriteOwner permission detected on ${AD_WRITEOWNER_FINDING_COUNT} Active Directory object(s)"
+        while IFS='|' read -r target_dn object_type right_name; do
+            [[ -n "$target_dn" ]] || continue
+            echo -e "  ${RED}${right_name}${RESET} -> ${YELLOW}${target_dn}${RESET} (${object_type})"
+        done < "$AD_WRITEOWNER_FINDINGS_FILE"
+
+        note "This result is based on the authenticated principal's effective rights, including group membership; no username or target object is hardcoded."
+        note "Evidence: $AD_WRITEOWNER_FINDINGS_FILE"
+
+        sps_record_finding \
+            "AD-ACL-WRITEOWNER" "high" "high" \
+            "The authenticated principal has effective WriteOwner permission on ${AD_WRITEOWNER_FINDING_COUNT} Active Directory object(s)." \
+            "Authenticated LDAP access|bloodyAD directory-wide effective-rights query" "Manual effective-permission validation" \
+            "authenticated-read" "$output_file|$AD_WRITEOWNER_FINDINGS_FILE" \
+            "Remove unnecessary WriteOwner ACEs and delegated ownership rights; review affected objects for unauthorized DACL changes." \
+            "No directory objects were modified; retain or securely remove the evidence files according to policy."
+    else
+        : > "$AD_WRITEOWNER_FINDINGS_FILE"
+    fi
+
     echo
     high_risk "High-signal writable-object results:"
 
     grep -Ei \
-        'DACL: WRITE|permission: (WRITE|CREATE_CHILD)|Deleted Objects|\\0ADEL:|MicrosoftDNS|DomainDnsZones|ForestDnsZones|svc_deploy|Remote Management|Backup|Deploy' \
+        'OWNER: WRITE|WRITE[_ -]?OWNER|DACL: WRITE|permission: (WRITE|CREATE_CHILD)|Deleted Objects|\\0ADEL:|MicrosoftDNS|DomainDnsZones|ForestDnsZones|svc_deploy|Remote Management|Backup|Deploy' \
         "$output_file" \
         | sed 's/^/  /' \
         || info "No high-signal patterns matched the summary parser"
@@ -5533,6 +5573,15 @@ if [ -s "$SMB_MARKER" ]; then
     smb_auth_check() {
         local AUTH="$1"
         local SMB_VER_ARG=""
+        local domain="${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}"
+        local display_command
+        local -a netexec_auth_args=()
+        local -a netexec_display_args=()
+        local -a smbclient_domain_args=()
+
+        if [[ "$AUTH" != "%" && "$AUTH" != "guest%" && -n "$domain" ]]; then
+            smbclient_domain_args=(-W "$domain")
+        fi
 
         # Prefer highest supported SMB version
         if $SMB_V3; then
@@ -5547,12 +5596,13 @@ if [ -s "$SMB_MARKER" ]; then
         fi
         
         echo -e "        ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-	echo -e "           ${GREEN}smbclient -L '//$TARGET_IPV4' -U '$AUTH' $SMB_VER_ARG -c 'exit'${RESET}"
-	record_command_argv "SMB" "Anonymous discovery" smbclient -L "//$TARGET_IPV4" -U "$AUTH" "$SMB_VER_ARG" -c exit
+        display_command="$(sps_shell_join smbclient -L "//$TARGET_IPV4" -U "$AUTH" "${smbclient_domain_args[@]}" $SMB_VER_ARG -c exit)"
+	echo -e "           ${GREEN}${display_command}${RESET}"
+	record_command_argv "SMB" "SMB authentication check" smbclient -L "//$TARGET_IPV4" -U "$AUTH" "${smbclient_domain_args[@]}" $SMB_VER_ARG -c exit
         
         # Capture smbclient output
         local OUT
-        OUT=$(smbclient -L "//$TARGET_IPV4" -U "$AUTH" $SMB_VER_ARG -c 'exit' 2>&1)
+        OUT=$(smbclient -L "//$TARGET_IPV4" -U "$AUTH" "${smbclient_domain_args[@]}" $SMB_VER_ARG -c 'exit' 2>&1)
 
         # NTLM disabled = return failure (do NOT treat as special case externally)
         if echo "$OUT" | grep -q "NT_STATUS_NOT_SUPPORTED"; then
@@ -5576,9 +5626,14 @@ if [ -s "$SMB_MARKER" ]; then
                     OUT=$(netexec smb "$TARGET_IPV4" -u "guest" -p "" -k 2>&1)
                 else
                     #echo "User|Pass SMB auth"
-                    echo -e "           ${GREEN}netexec smb $TARGET_IPV4 -u '$AUTH_USER' -p '$MASKED_AUTH_PASS' -k ${RESET}"
-                    record_command_argv "SMB" "Authenticated discovery - Kerberos" netexec smb "$TARGET_IPV4" -u "$AUTH_USER" -p "$AUTH_PASS" -k
-                    OUT=$(netexec smb "$TARGET_IPV4" -u "$AUTH_USER" -p "$AUTH_PASS" -k 2>&1)
+                    sps_build_netexec_smb_auth_args netexec_auth_args "$AUTH_USER" "$AUTH_PASS" "$domain"
+                    sps_build_netexec_smb_auth_args netexec_display_args "$AUTH_USER" "$MASKED_AUTH_PASS" "$domain"
+                    netexec_auth_args+=(-k)
+                    netexec_display_args+=(-k)
+                    display_command="$(sps_shell_join netexec smb "$TARGET_IPV4" "${netexec_display_args[@]}")"
+                    echo -e "           ${GREEN}${display_command}${RESET}"
+                    record_command_argv "SMB" "Authenticated discovery - Kerberos" netexec smb "$TARGET_IPV4" "${netexec_auth_args[@]}"
+                    OUT=$(netexec smb "$TARGET_IPV4" "${netexec_auth_args[@]}" 2>&1)
                 fi
                 
                 if echo "$OUT" | grep -qP '\[\+\]'; then
@@ -5723,7 +5778,10 @@ if [ -s "$SMB_MARKER" ]; then
         local SMB_USER="$1"
         local SMB_PASS="$2"
         local SMB_LABEL="$3"
+        local domain="${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}"
         local OUT display_command smbclient_target smbclient_command
+        local -a auth_args=()
+        local -a display_auth_args=()
         local -a smb_command=(netexec smb "$TARGET_IPV4")
         local -a smb_display=(netexec smb "$TARGET_IPV4")
 
@@ -5734,8 +5792,16 @@ if [ -s "$SMB_MARKER" ]; then
             smb_command+=(-u guest -p '' --shares)
             smb_display+=(-u guest -p '' --shares)
         elif [[ "$SMB_LABEL" == "AUTHENTICATED" ]]; then
-            smb_command+=(-u "$SMB_USER" -p "$SMB_PASS" -k --shares)
-            smb_display+=(-u "$SMB_USER" -p "$(sps_secret_value "$SMB_PASS")" -k --shares)
+            sps_build_netexec_smb_auth_args auth_args "$SMB_USER" "$SMB_PASS" "$domain"
+            sps_build_netexec_smb_auth_args display_auth_args "$SMB_USER" "$(sps_secret_value "$SMB_PASS")" "$domain"
+            smb_command+=("${auth_args[@]}")
+            smb_display+=("${display_auth_args[@]}")
+            if [[ "$NTLM_ENABLED" != true ]]; then
+                smb_command+=(-k)
+                smb_display+=(-k)
+            fi
+            smb_command+=(--shares)
+            smb_display+=(--shares)
         else
             return 1
         fi
@@ -5883,7 +5949,10 @@ if [ -s "$SMB_MARKER" ]; then
             success "SMB authentication successful"
             SMB_AUTH_OK=true
             
-            if [[ "$NTLM_ENABLED" = true ]]; then
+            if [[ -n "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}" ]] && command -v netexec >/dev/null 2>&1; then
+                smb_enum_netexec "$AUTH_USER" "$AUTH_PASS" "AUTHENTICATED" || \
+                    notify "Authenticated but no shares are visible to this user"
+            elif [[ "$NTLM_ENABLED" = true ]]; then
                 smb_enum_smbclient "$AUTH_USER%$AUTH_PASS" "AUTHENTICATED" || \
                     notify "Authenticated but no shares are visible to this user"
             else
@@ -5902,22 +5971,30 @@ if [ -s "$SMB_MARKER" ]; then
         [[ "$SKIP_GUEST_CHECKS" == true ]] || smb_enum_smbmap "GUEST" "-u guest -p ''" || true
     fi
 
-    # -------- CME Enumeration --------
-    if command -v crackmapexec >/dev/null 2>&1; then
+    # -------- CME / NetExec User Enumeration --------
+    if command -v crackmapexec >/dev/null 2>&1 || command -v netexec >/dev/null 2>&1; then
         info "SMB Shares Detected!"
         info "  Attempting to Enumerate Access..."
 
-        if $SMB_NULL_OK; then
+        if $SMB_NULL_OK && command -v crackmapexec >/dev/null 2>&1; then
             cme_enum_users "NULL session" "" || true
         fi
-        if $SMB_GUEST_OK; then
+        if $SMB_GUEST_OK && command -v crackmapexec >/dev/null 2>&1; then
             cme_enum_users "GUEST" "-u guest -p ''" || true
         fi
-        if $CREDS_PROVIDED; then 
-            if [[ "$NTLM_ENABLED" = true ]]; then
+        if $CREDS_PROVIDED; then
+            if [[ -n "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}" ]] && command -v netexec >/dev/null 2>&1; then
+                NXC_AUTH_ARGS=()
+                sps_build_netexec_smb_auth_args NXC_AUTH_ARGS "$AUTH_USER" "$AUTH_PASS" "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}"
+                [[ "$NTLM_ENABLED" != true ]] && NXC_AUTH_ARGS+=(-k)
+                nxc_enum_users "AUTHENTICATED" "${NXC_AUTH_ARGS[@]}" || true
+            elif [[ "$NTLM_ENABLED" = true ]] && command -v crackmapexec >/dev/null 2>&1; then
                 cme_enum_users "AUTHENTICATED" "-u $AUTH_USER -p $AUTH_PASS" || true
-            else
-                nxc_enum_users "AUTHENTICATED" "-u $AUTH_USER -p $AUTH_PASS -d ${AUTH_DOMAIN:-$LDAP_DOMAIN} -k" || true
+            elif command -v netexec >/dev/null 2>&1; then
+                NXC_AUTH_ARGS=()
+                sps_build_netexec_smb_auth_args NXC_AUTH_ARGS "$AUTH_USER" "$AUTH_PASS" "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}"
+                NXC_AUTH_ARGS+=(-k)
+                nxc_enum_users "AUTHENTICATED" "${NXC_AUTH_ARGS[@]}" || true
             fi
         fi
     fi
@@ -6072,7 +6149,7 @@ if [ -s "$KERB_MARKER" ]; then
         fi
 
         if $CREDS_PROVIDED; then
-            kerberos_auth_check
+            sps_run_optional_kerberos_auth_check
         fi
     else
         notify "Kerberos detected, but domain/realm could not be resolved"
@@ -6182,7 +6259,7 @@ if $CREDS_PROVIDED; then
     # Check creds is Kerberos Service is deteted.
     if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "88"; then
         KERB_AUTH_OK=false
-        $CREDS_PROVIDED && kerberos_auth_check || true
+        sps_run_optional_kerberos_auth_check
     fi
  
     echo
@@ -6962,6 +7039,10 @@ generate_synopsis() {
         print_item "$ASREP_OK" "AS-REP Roasting is possible (User hashes obtainable)"
         print_item "$LAPS_READABLE" "LAPS Passwords are READABLE (High Risk / Local Admin)"
         print_item "$CAN_JOIN_COMPUTERS_TO_DOMAIN" "MachineAccountQuota Allows users to create up to ${MACHINE_ACCOUNT_QUOTA} computer accounts"
+        if [[ "${AD_WRITEOWNER_FOUND:-false}" == true ]]; then
+            print_item "true" "Effective WriteOwner permission detected on ${AD_WRITEOWNER_FINDING_COUNT} Active Directory object(s)"
+            echo -e "        Evidence: ${YELLOW}${AD_WRITEOWNER_FINDINGS_FILE}${RESET}"
+        fi
         if [[ -n "$BH_ZIP_FILE" ]]; then
             print_item "true" "BloodHound Data was gathered for: ${AUTH_DOMAIN:-$LDAP_DOMAIN}"
             echo -e "        File: ${YELLOW}${BH_ZIP_FILE}${RESET}"
@@ -7177,6 +7258,24 @@ attack_path_evaluation() {
         echo "         john --wordlist=/usr/share/wordlists/rockyou.txt --format=krb5asrep asrep_hashes_$TARGET_IPV4.txt"
         echo "   - Crack hashes offline (hashcat mode 18200)"
         echo "   - Re-test LDAP/SMB/WinRM with cracked creds"
+        echo
+    fi
+
+    # WriteOwner is evaluated directory-wide for the authenticated principal
+    # and its effective group token. It is not tied to a named user or object.
+    if [[ "${AD_WRITEOWNER_FOUND:-false}" == true ]]; then
+        ATTACK_PATHS+=("Active Directory WriteOwner permission abuse candidate")
+        critical "Attack Path: Effective WriteOwner permission on Active Directory object(s)"
+        note "Affected objects: ${AD_WRITEOWNER_FINDING_COUNT}"
+        note "Evidence: ${AD_WRITEOWNER_FINDINGS_FILE}"
+        lightbulb "Validation and remediation steps:"
+        echo "   - Confirm the effective ACE, inheritance, and trustee through BloodHound or direct ACL review"
+        echo "   - Determine whether ownership would permit an unauthorized DACL change on the affected object"
+        echo "   - Remove unnecessary WriteOwner delegation and review the object's current owner and DACL"
+        if [[ -s "${AD_WRITEOWNER_FINDINGS_FILE:-}" ]] && grep -q '|GPO|WriteOwner$' "$AD_WRITEOWNER_FINDINGS_FILE"; then
+            lightbulb "Authorized GPO impact test:"
+            echo -e "   ${GREEN}SharpGPOAbuse.exe --AddComputerTask --TaskName \"UpdateService\" --Author \"NT AUTHORITY\\SYSTEM\" --Command \"cmd.exe\" --Arguments \"/c <command>\" --GPOName \"<GPO name>\"${RESET}"
+        fi
         echo
     fi
     

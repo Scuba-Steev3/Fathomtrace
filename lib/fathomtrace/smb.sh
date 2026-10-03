@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 
+sps_build_netexec_smb_auth_args() {
+    local result_name="$1"
+    local user="$2"
+    local password="$3"
+    local domain="${4:-}"
+    local -n result_ref="$result_name"
+
+    result_ref=(-u "$user" -p "$password")
+    if [[ -n "$domain" ]]; then
+        result_ref+=(-d "$domain")
+    fi
+}
+
 sps_parse_cme_users() {
     awk '
         /^[A-Z]+[[:space:]]+[0-9.]+/ {
