@@ -13,6 +13,29 @@ it is named after, it turns an unfamiliar target into a useful service map.
 
 - Maintained default, web, Active Directory, and extended TCP port profiles.
 - Custom ports and ranges with configurable jobs, timeouts, and retries.
+- Profile-aware targeted UDP scanning with conservative `open` versus
+  `open|filtered` reporting. SNMP/161 is included by default, with a bounded
+  read-only `sysDescr.0` check for device identity and `public` community
+  exposure.
+- Read-only SMTP greeting, EHLO/HELO, HELP, capability, and hostname discovery
+  on ports 25, 465, 587, and 2525. Port 465 uses OpenSSL when available.
+- Read-only POP3 CAPA discovery on ports 110/995 and IMAP CAPABILITY discovery
+  on ports 143/993, including TLS-upgrade and authentication advertisements.
+- Automatic mail TLS certificate capture for implicit TLS and advertised
+  STARTTLS/STLS services, with CN, SAN, issuer, validity, serial, and SHA-256
+  fingerprint parsing. Concrete CN/SAN hostnames feed host discovery.
+- Contextual IMAP OpenSSL connection commands for STARTTLS on port 143 and
+  implicit TLS on port 993, plus tagged-command and credential-safety reminders.
+- A single encrypted IMAP login validation when `-u/--user` and `-p/--pass`
+  are supplied. Port 993 is preferred over STARTTLS/143, passwords are never
+  retained in transcripts, and no mailbox or message command is issued.
+- Optional Telnet-based greeting capture on cleartext SMTP, POP3, and IMAP
+  ports when a local `telnet` client is available; no input is sent.
+- A concise port-scan phase that reports listeners first, followed by a separate
+  service-exposure phase for protocol probes, banners, certificates, and
+  authenticated or opt-in enumeration.
+- Service-exposure output grouped by protocol with descriptive service titles
+  and separate endpoint blocks for clear terminal review.
 - Deterministic worker aggregation instead of concurrent shared-file writes.
 - Service-aware NetBIOS, FTP, SMB, RPC, LDAP, Kerberos, DNS, web, MSSQL, NFS, Docker,
   Redis, Kubernetes, database, WinRM, RDP, AD CS, and BloodHound integrations.
@@ -34,6 +57,25 @@ External utilities are optional. Their modules run only when their service and
 feature prerequisites are satisfied. Examples include Nmap, curl, OpenSSL,
 ffuf, `nmblookup` or `nbtscan`, DNS/LDAP/SMB clients, NetExec,
 Impacket, Certipy, and BloodHound tooling.
+
+Targeted UDP scanning is enabled by default. The default profile checks UDP
+53, 123, 137, 161, and 500; the web profile checks 53 and 161; the AD profile
+checks 53, 88, 123, 137, 161, 389, and 464; and the extended profile adds
+common TFTP, DHCP, IPMI, MSSQL Browser, SSDP, IPsec NAT-T, and mDNS ports.
+Nmap classifies the selected set when available. Without Nmap, Fathomtrace can
+still send its bounded SNMP/161 probe, but it does not guess the state of silent
+UDP services.
+
+Authenticated IMAP behavior is intentionally staged. Supplying `-u` and `-p`
+performs one encrypted login validation and logs out without opening a mailbox.
+`--imap-enum` additionally issues `LIST "" "*"`. Message export requires the
+explicit `--imap-dump` flag. It examines `--imap-mailbox` (default `INBOX`)
+first, then every other selectable mailbox returned by `LIST`; hierarchy nodes
+marked `\Noselect` are skipped. Mailboxes are opened with read-only `EXAMINE`,
+and at most `--imap-max-messages` newest messages total are retrieved with
+`BODY.PEEK[]`. Empty or inaccessible mailboxes do not stop later mailbox checks.
+Exports are treated as sensitive artifacts, so `--imap-dump` cannot be combined
+with `--no-loot`.
 
 NetBIOS identity detection runs automatically against the selected target. It
 uses `nmblookup -A` when available and falls back to `nbtscan`. A valid unique
@@ -81,6 +123,15 @@ command name.
 # Custom ports and ranges
 ./fathomtrace scan 10.10.10.10 --ports 22,80,443,8000-8010
 
+# Override the profile's targeted UDP ports and run UDP service detection
+./fathomtrace scan 10.10.10.10 --udp-ports 53,123,161,500 --service-detect
+
+# TCP-only run
+./fathomtrace scan 10.10.10.10 --no-udp
+
+# Make one encrypted IMAP login attempt when IMAP is confirmed
+./fathomtrace scan 10.10.10.10 --ports 143,993 -u analyst -p 'REPLACE_ME'
+
 # Validate without connecting or writing persistent artifacts
 ./fathomtrace scan 127.0.0.1 --dry-run --no-loot --debug --ascii
 
@@ -101,7 +152,7 @@ Run `fathomtrace --help` for the canonical reference.
 | Group | Options |
 |---|---|
 | Commands | `scan`, `help`, `version` |
-| Port selection | `--profile default\|web\|ad\|extended`, repeatable `--ports LIST` |
+| Port selection | `--profile default\|web\|ad\|extended`, repeatable `--ports LIST`, `--udp-ports LIST`, `--no-udp` |
 | Performance | `--jobs N`, `--connect-timeout SEC`, `--retries N` |
 | Output | `--format text\|json\|csv`, `--quiet`, `--verbose`, `--debug`, `--color`, `--no-color`, `--ascii`, `--unicode`, `--show-secrets` |
 | Artifacts | `--no-loot`, `--loot-dir PATH`, `--index-format text\|json\|csv\|all`, `--overwrite` |
@@ -180,13 +231,13 @@ Diagnostics go to standard error. Schema version `1.0` reports:
 
 - command status and exit code;
 - requested and resolved targets;
-- profile and open ports;
+- profile, confirmed TCP/UDP ports, and inconclusive UDP `open|filtered` candidates;
 - duration and session ID;
 - artifact root, manifest, and artifact count;
 - the final error when the operation fails.
 
 ```json
-{"schema_version":"1.0","command":"scan","status":"completed","exit_code":0,"target":"10.10.10.10","resolved_target":"10.10.10.10","profile":"default","open_ports":[22,80],"duration_seconds":3,"session_id":"20260719T210000Z_1a2b3c4d","artifact_root":"/work/recon_10.10.10.10/20260719T210000Z_1a2b3c4d","manifest":"reports/manifest.jsonl","artifact_count":8,"error":null}
+{"schema_version":"1.0","command":"scan","status":"completed","exit_code":0,"target":"10.10.10.10","resolved_target":"10.10.10.10","profile":"default","open_ports":[22,80],"open_udp_ports":[161],"possible_udp_ports":[53],"duration_seconds":3,"session_id":"20260719T210000Z_1a2b3c4d","artifact_root":"/work/recon_10.10.10.10/20260719T210000Z_1a2b3c4d","manifest":"reports/manifest.jsonl","artifact_count":8,"error":null}
 ```
 
 ## Artifact sessions

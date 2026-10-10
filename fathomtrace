@@ -5,18 +5,19 @@
 # Bash Recon and Service Enumeration Helper
 #
 # Purpose:
-#   Perform a bounded-concurrency TCP connect scan against a curated service
-#   profile, then run optional service-specific enumeration and produce
-#   evidence-based findings and suggested next steps.
+#   Perform a bounded-concurrency TCP connect scan plus a small targeted UDP
+#   scan, then run optional service-specific enumeration and produce evidence-
+#   based findings and suggested next steps.
 #
 # Implemented capabilities:
 #   - Concurrent TCP connect scanning of common infrastructure and AD ports
+#   - Targeted UDP discovery with SNMP/161 response and device identity checks
 #   - Optional Nmap service, version, script, and OS detection
 #   - Reverse-DNS, NetBIOS, LDAP RootDSE, TLS SAN, and HTTP redirect hostname discovery
 #   - HTTP/HTTPS redirect analysis, directory enumeration, and VHost discovery
 #   - DNS enumeration, AXFR testing, and optional subdomain brute forcing
-#   - FTP, SMB, RPC, LDAP/LDAPS, Kerberos, MSSQL, NFS, Docker, Redis,
-#     Kubernetes, RDP, WinRM, database, and printer-service checks
+#   - FTP, SMTP, POP3, IMAP, SMB, RPC, LDAP/LDAPS, Kerberos, MSSQL, NFS,
+#     Docker, Redis, Kubernetes, RDP, WinRM, database, and printer-service checks
 #   - Anonymous, guest, and authenticated SMB/LDAP access validation
 #   - Optional AS-REP Roasting and Kerberoasting assessment
 #   - Optional BloodHound data collection
@@ -127,11 +128,16 @@ source "$FATHOMTRACE_LIB_DIR/output.sh"
 source "$FATHOMTRACE_LIB_DIR/validation.sh"
 source "$FATHOMTRACE_LIB_DIR/loot.sh"
 source "$FATHOMTRACE_LIB_DIR/scan.sh"
+source "$FATHOMTRACE_LIB_DIR/udp.sh"
 source "$FATHOMTRACE_LIB_DIR/netbios.sh"
 source "$FATHOMTRACE_LIB_DIR/rdp.sh"
 source "$FATHOMTRACE_LIB_DIR/smb.sh"
 source "$FATHOMTRACE_LIB_DIR/ldap.sh"
 source "$FATHOMTRACE_LIB_DIR/ad_acl.sh"
+source "$FATHOMTRACE_LIB_DIR/mail.sh"
+source "$FATHOMTRACE_LIB_DIR/smtp.sh"
+source "$FATHOMTRACE_LIB_DIR/pop3.sh"
+source "$FATHOMTRACE_LIB_DIR/imap.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -243,6 +249,28 @@ KERBEROS_ACCESS_CONFIRMED=false
 SMB_PORT_OPEN=false
 SMB_SERVICE_CONFIRMED=false
 SMB_ACCESS_CONFIRMED=false
+SMTP_PORT_OPEN=false
+SMTP_SERVICE_CONFIRMED=false
+SMTP_HOSTNAME=""
+POP3_PORT_OPEN=false
+POP3_SERVICE_CONFIRMED=false
+POP3_HOSTNAME=""
+IMAP_PORT_OPEN=false
+IMAP_SERVICE_CONFIRMED=false
+IMAP_HOSTNAME=""
+IMAP_AUTH_OK=false
+IMAP_AUTH_STATUS="skipped"
+IMAP_AUTH_PORT=""
+IMAP_AUTH_TRANSPORT=""
+IMAP_DUMP_MESSAGES_EXPORTED=0
+IMAP_DUMP_MAILBOXES_EXAMINED=0
+IMAP_DUMP_MAILBOXES_FAILED=0
+IMAP_DUMP_SUMMARY=""
+IMAP_DUMP_LOOT_PATH=""
+SNMP_PORT_OPEN=false
+SNMP_SERVICE_CONFIRMED=false
+SNMP_PUBLIC_ACCESS_CONFIRMED=false
+SNMP_SYS_DESCR=""
 NETBIOS_DETECTED=false
 NETBIOS_NAME=""
 NETBIOS_WORKGROUP=""
@@ -372,10 +400,21 @@ WEB_SERVICES_FILE="$RUNTIME_TMP_DIR/web-services"
 SMB_MARKER="$RUNTIME_TMP_DIR/smb"
 KERB_MARKER="$RUNTIME_TMP_DIR/kerberos"
 LDAP_MARKER="$RUNTIME_TMP_DIR/ldap"
+SMTP_MARKER="$RUNTIME_TMP_DIR/smtp"
+SMTP_CONFIRMED_FILE="$RUNTIME_TMP_DIR/smtp-confirmed"
+POP3_MARKER="$RUNTIME_TMP_DIR/pop3"
+POP3_CONFIRMED_FILE="$RUNTIME_TMP_DIR/pop3-confirmed"
+IMAP_MARKER="$RUNTIME_TMP_DIR/imap"
+IMAP_CONFIRMED_FILE="$RUNTIME_TMP_DIR/imap-confirmed"
 OPEN_PORTS_FILE="$RUNTIME_TMP_DIR/open-ports"
+UDP_OPEN_PORTS_FILE="$RUNTIME_TMP_DIR/udp-open-ports"
+UDP_POSSIBLE_PORTS_FILE="$RUNTIME_TMP_DIR/udp-possible-ports"
 touch "$HINT_FILE" "$HOSTS_FILE" "$DISCOVERED_HOSTS" "$REDIRECT_HOSTS" \
     "$HTTP_MARKER" "$HTTPS_MARKER" "$SMB_MARKER" "$KERB_MARKER" \
-    "$LDAP_MARKER" "$OPEN_PORTS_FILE" "$WEB_SERVICES_FILE"
+    "$LDAP_MARKER" "$SMTP_MARKER" "$SMTP_CONFIRMED_FILE" \
+    "$POP3_MARKER" "$POP3_CONFIRMED_FILE" "$IMAP_MARKER" "$IMAP_CONFIRMED_FILE" \
+    "$OPEN_PORTS_FILE" "$UDP_OPEN_PORTS_FILE" "$UDP_POSSIBLE_PORTS_FILE" \
+    "$WEB_SERVICES_FILE"
 
 sps_cleanup_runtime() {
     local exit_code=$?
@@ -415,8 +454,8 @@ service_version_detection() {
     fi
 
     if [ ! -s "$OPEN_PORTS_FILE" ]; then
-        warn "No open ports available for service/version detection"
-        record_module_status "service-detect" "skipped" "no open ports"
+        warn "No open TCP ports available for TCP service/version detection"
+        record_module_status "service-detect" "skipped" "no open TCP ports"
         return 1
     fi
 
@@ -4710,14 +4749,18 @@ PORTS=(
     "389:LDAP:interesting"
     "443:HTTPS:open"
     "445:SMB:high"
+    "465:SMTPS:interesting"
     "515:PRINTER:open"
+    "587:SMTP Submission:interesting"
     "631:PRINTER:open"
     "636:LDAPS:interesting"
     "993:IMAPS:interesting"
+    "995:POP3S:interesting"
     "1433:SQL Server:high"
     "2049:Network File System:high"
     "2375:Docker API:high"
     "2377:Docker Swarm:interesting"
+    "2525:SMTP-Alt:interesting"
     "3000:Web Dev:interesting"
     "3306:MySQL:interesting"
     "3389:RDP:high"
@@ -4734,6 +4777,7 @@ PORTS=(
     "54925:BROTHER_PRINTER:open"
 )
 sps_configure_ports || exit $?
+sps_configure_udp_ports || exit $?
 
 # --------- Port-derived validation ideas (never CVE findings) ----------
 declare -A ATTACK_SURFACE_HINTS=(
@@ -4741,13 +4785,19 @@ declare -A ATTACK_SURFACE_HINTS=(
   [22]="Validate SSH authentication policy, algorithms, and the identified server version"
   [23]="Cleartext auth, legacy devices, credential reuse"
   [25]="Validate SMTP relay policy, user disclosure, and the identified mail-server version"
+  [465]="Review implicit-TLS SMTP capabilities, authentication exposure, and certificate identity"
+  [587]="Review SMTP submission STARTTLS enforcement and advertised authentication mechanisms"
+  [2525]="Review alternate SMTP capabilities, authentication exposure, and relay policy"
   [53]="Zone transfer (AXFR), DNS recursion"
   [80]="Web vulns: file upload, auth bypass, outdated CMS"
   [88]="Kerberos roasting, AD misconfig, pre-auth disabled"
   [111]="RPC program discovery, NFS/mountd enumeration, and dynamic RPC services"
-  [110]="Cleartext POP3, weak creds"
+  [110]="Review POP3 STLS support and advertised authentication mechanisms"
+  [995]="Review implicit-TLS POP3 capabilities, authentication exposure, and certificate identity"
   [139]="Validate SMB dialects, null sessions, signing, and patch posture"
   [389]="Anonymous LDAP bind, domain info disclosure"
+  [143]="Review IMAP STARTTLS support and advertised authentication mechanisms"
+  [993]="Review implicit-TLS IMAP capabilities, authentication exposure, and certificate identity"
   [443]="TLS misconfig, weak ciphers, web vulns"
   [445]="Validate SMB signing, relay resistance, dialects, and patch posture"
   [631]="CUPS info leak, printer RCE class issues"
@@ -5317,7 +5367,9 @@ run_mssql_cmdshell_check() {
 }
 
 # --------- After port scanning completes ----------
-OPEN_PORTS=()   # Will store open ports
+OPEN_PORTS=()   # Will store open TCP ports
+UDP_OPEN_PORTS=()
+UDP_POSSIBLE_PORTS=()
 
 sps_refresh_service_states() {
     [[ "${LDAP_FOUND:-false}" == true || "${LDAP_ENUM_DONE:-false}" == true ]] && LDAP_SERVICE_CONFIRMED=true
@@ -5371,8 +5423,7 @@ record_command "Invocation" "Repeat this script run" "$INVOCATION"
 # --------- Function to Scan a Single Port ----------
 # ---------- PORT SCAN LOOP ----------
 run_port_scan "$TARGET_IPV4" "${PORTS[@]}" || exit 5
-
-sps_refresh_service_states
+run_udp_scan "$TARGET_IPV4" "${UDP_PORTS[@]}" || true
 
 # --------- Reconstruct OPEN_PORTS safely ----------
 OPEN_PORTS=()
@@ -5381,9 +5432,33 @@ if [ -s "$OPEN_PORTS_FILE" ]; then
 fi
 printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "3389" && RDP_PORT_OPEN=true
 
+if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
+    info "Open TCP ports: ${OPEN_PORTS[*]}"
+else
+    warn "No open TCP ports detected"
+fi
+if [ "${#UDP_OPEN_PORTS[@]}" -gt 0 ]; then
+    info "Confirmed open UDP ports: ${UDP_OPEN_PORTS[*]}"
+fi
+if [ "${#UDP_POSSIBLE_PORTS[@]}" -gt 0 ]; then
+    info "Inconclusive UDP open|filtered candidates: ${UDP_POSSIBLE_PORTS[*]}"
+fi
+
+sps_section "Service Exposure Checks"
+
+# --------- Protocol-aware service discovery ----------
+sps_run_service_probes "${OPEN_PORTS[@]}"
+sps_run_smtp_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_pop3_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_imap_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_snmp_discovery "$TARGET_IPV4"
+
+sps_refresh_service_states
+
 # --------- Optional Service / Version / OS Detection ----------
 if [ "$ENABLE_SERVICE_DETECT" = true ]; then
     service_version_detection "$TARGET_IPV4" || true
+    sps_udp_service_version_detection "$TARGET_IPV4" || true
 fi
 
 # --------- NetBIOS Name Service Detection (UDP/137) ----------
@@ -5435,21 +5510,11 @@ if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
     record_command "Discovery" "Full TCP port sweep" "$nmap_sweep_command"
     
     echo
-    info "Open ports detected: ${OPEN_PORTS[*]}"
-    echo
     info "Port-derived validation ideas (not vulnerability or CVE findings):"
     for port in "${OPEN_PORTS[@]}"; do
         print_attack_surface_hint "$port"
     done
-else
-    warn "No open ports detected"
 fi
-
-echo -e "\n${BLUE}========================================${RESET}"
-
-echo -e "\n${BLUE}========================================${RESET}"
-echo -e "${BYELLOW}  Post-Scan Service Exposure Checks ${RESET}"
-echo -e "${BLUE}========================================${RESET}"
 
 if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
     for port in "${OPEN_PORTS[@]}"; do
@@ -7152,6 +7217,19 @@ attack_path_evaluation() {
         lightbulb "Next step: confirm Remote Desktop logon rights and authorization before starting an interactive RDP session."
         echo
     fi
+    if [[ "${IMAP_AUTH_OK:-false}" == true ]]; then
+        echo -e "\n ${CYAN}AUTHENTICATED MAIL ACCESS${RESET}"
+        echo -e " --------------------------------------"
+        ATTACK_PATHS+=("Authenticated IMAP mailbox access for ${AUTH_USER}")
+        success "$(sps_imap_auth_success_text)"
+        finding "Attack Path: Valid credentials provide encrypted IMAP mailbox access"
+        note "Evidence: the server returned a tagged OK response to one LOGIN attempt over ${IMAP_AUTH_TRANSPORT:-encrypted} TLS."
+        lightbulb "Next step: review authorized mailbox scope; use --imap-enum or --imap-dump only when message access is explicitly permitted."
+        if sps_imap_dump_has_exported_messages; then
+            sps_imap_print_attack_path_details
+        fi
+        echo
+    fi
     # ---------------------------------------------------------------------------
     # Domain-controller version context
     #
@@ -7962,8 +8040,23 @@ info "Service states (port open / service confirmed / access confirmed):"
 printf '    LDAP:     %s / %s / %s\n' "$LDAP_PORT_OPEN" "$LDAP_SERVICE_CONFIRMED" "$LDAP_ACCESS_CONFIRMED"
 printf '    Kerberos: %s / %s / %s\n' "$KERBEROS_PORT_OPEN" "$KERBEROS_SERVICE_CONFIRMED" "$KERBEROS_ACCESS_CONFIRMED"
 printf '    SMB:      %s / %s / %s\n' "$SMB_PORT_OPEN" "$SMB_SERVICE_CONFIRMED" "$SMB_ACCESS_CONFIRMED"
+printf '    SMTP:     %s / %s / n/a\n' "$SMTP_PORT_OPEN" "$SMTP_SERVICE_CONFIRMED"
+printf '    POP3:     %s / %s / n/a\n' "$POP3_PORT_OPEN" "$POP3_SERVICE_CONFIRMED"
+printf '    IMAP:     %s / %s / %s\n' "$IMAP_PORT_OPEN" "$IMAP_SERVICE_CONFIRMED" "${IMAP_AUTH_OK:-false}"
+printf '    SNMP/UDP: %s / %s / %s\n' "$SNMP_PORT_OPEN" "$SNMP_SERVICE_CONFIRMED" "$SNMP_PUBLIC_ACCESS_CONFIRMED"
 printf '    Web:      %s / %s / %s\n' "$WEB_PORT_OPEN" "$WEB_SERVICE_CONFIRMED" "$WEB_ACCESS_CONFIRMED"
 printf '    RDP auth: %s\n' "$(sps_rdp_auth_summary)"
+
+if [[ "${IMAP_AUTH_OK:-false}" == true ]]; then
+    echo
+    success "$(sps_imap_auth_success_text)"
+    finding "Authenticated IMAP access is confirmed; mailbox enumeration and read-only export remain explicit opt-ins."
+fi
+if [[ "${SNMP_SERVICE_CONFIRMED:-false}" == true ]]; then
+    echo
+    success "SNMP service confirmed on UDP/161"
+    [[ -n "${SNMP_SYS_DESCR:-}" ]] && finding "SNMP device description: $SNMP_SYS_DESCR"
+fi
 
 if [[ $HAS_SMB -eq 1 && $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 ]]; then
     alert "Observed AD-related service surface: SMB, LDAP, and Kerberos"
@@ -8095,6 +8188,15 @@ cat <<EOF
 [DNS]
   - Attempt zone transfers (AXFR)
   - Enumerate subdomains
+EOF
+        ;;
+        SNMP)
+cat <<EOF
+[SNMP]
+  - Review sysDescr and other read-only system identity values
+  - Replace default communities and prefer SNMPv3 authentication/encryption
+  - Restrict UDP/161 to authorized management networks
+  - Tools: snmpget, snmpwalk, nmap -sU -sV -p 161
 EOF
         ;;
         WINRM)

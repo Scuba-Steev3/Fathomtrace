@@ -226,6 +226,22 @@ sps_section() {
     printf '%b========================================%b\n' "$BLUE" "$RESET"
 }
 
+sps_service_heading() {
+    [[ "${QUIET:-false}" == true || "${OUTPUT_FORMAT:-text}" != "text" ]] && return 0
+    local title="$1"
+    local description="${2:-}"
+    printf '\n %b%s%b\n' "$CYAN" "$title" "$RESET"
+    printf ' --------------------------------------\n'
+    [[ -n "$description" ]] && printf '  %s\n' "$description"
+}
+
+sps_service_endpoint() {
+    [[ "${QUIET:-false}" == true || "${OUTPUT_FORMAT:-text}" != "text" ]] && return 0
+    local title="$1"
+    printf '\n  %b%s%b\n' "$BYELLOW" "$title" "$RESET"
+    printf '  ......................................\n'
+}
+
 sps_print_legend() {
     [[ "${QUIET:-false}" == true || "${OUTPUT_FORMAT:-text}" != "text" || "${VERBOSE:-false}" != true ]] && return 0
     cat << EOF
@@ -302,6 +318,10 @@ sps_emit_structured_summary() {
     local findings="${FINDINGS_FILE:-}"
     local open_ports_json=""
     local open_ports_csv=""
+    local open_udp_ports_json=""
+    local open_udp_ports_csv=""
+    local possible_udp_ports_json=""
+    local possible_udp_ports_csv=""
     local port
 
     ((exit_code != 0)) && status="failed"
@@ -314,6 +334,18 @@ sps_emit_structured_summary() {
             open_ports_csv+="${open_ports_csv:+;}$port"
         done
     fi
+    if declare -p UDP_OPEN_PORTS > /dev/null 2>&1; then
+        for port in "${UDP_OPEN_PORTS[@]}"; do
+            open_udp_ports_json+="${open_udp_ports_json:+,}$port"
+            open_udp_ports_csv+="${open_udp_ports_csv:+;}$port"
+        done
+    fi
+    if declare -p UDP_POSSIBLE_PORTS > /dev/null 2>&1; then
+        for port in "${UDP_POSSIBLE_PORTS[@]}"; do
+            possible_udp_ports_json+="${possible_udp_ports_json:+,}$port"
+            possible_udp_ports_csv+="${possible_udp_ports_csv:+;}$port"
+        done
+    fi
 
     case "$OUTPUT_FORMAT" in
         json)
@@ -323,7 +355,8 @@ sps_emit_structured_summary() {
                 "$(sps_json_escape "${ORIGINAL_TARGET:-${TARGET:-}}")" \
                 "$(sps_json_escape "${TARGET_IPV4:-}")" \
                 "$(sps_json_escape "${SCAN_PROFILE:-default}")"
-            printf '"open_ports":[%s],"duration_seconds":%d,' "$open_ports_json" "$duration"
+            printf '"open_ports":[%s],"open_udp_ports":[%s],"possible_udp_ports":[%s],"duration_seconds":%d,' \
+                "$open_ports_json" "$open_udp_ports_json" "$possible_udp_ports_json" "$duration"
             printf '"session_id":"%s","artifact_root":' "$(sps_json_escape "${SESSION_ID:-}")"
             if [[ -n "$artifact_root" ]]; then
                 printf '"%s"' "$(sps_json_escape "$artifact_root")"
@@ -352,14 +385,16 @@ sps_emit_structured_summary() {
             printf '}\n'
             ;;
         csv)
-            printf 'schema_version,command,status,exit_code,target,resolved_target,profile,open_ports,duration_seconds,session_id,artifact_root,manifest,findings,artifact_count,finding_count,error\n'
-            printf '1.0,%s,%s,%d,%s,%s,%s,%s,%d,%s,%s,%s,%s,%d,%d,%s\n' \
+            printf 'schema_version,command,status,exit_code,target,resolved_target,profile,open_ports,open_udp_ports,possible_udp_ports,duration_seconds,session_id,artifact_root,manifest,findings,artifact_count,finding_count,error\n'
+            printf '1.0,%s,%s,%d,%s,%s,%s,%s,%s,%s,%d,%s,%s,%s,%s,%d,%d,%s\n' \
                 "$(sps_csv_escape "${COMMAND:-scan}")" \
                 "$(sps_csv_escape "$status")" "$exit_code" \
                 "$(sps_csv_escape "${ORIGINAL_TARGET:-${TARGET:-}}")" \
                 "$(sps_csv_escape "${TARGET_IPV4:-}")" \
                 "$(sps_csv_escape "${SCAN_PROFILE:-default}")" \
-                "$(sps_csv_escape "$open_ports_csv")" "$duration" \
+                "$(sps_csv_escape "$open_ports_csv")" \
+                "$(sps_csv_escape "$open_udp_ports_csv")" \
+                "$(sps_csv_escape "$possible_udp_ports_csv")" "$duration" \
                 "$(sps_csv_escape "${SESSION_ID:-}")" \
                 "$(sps_csv_escape "$artifact_root")" \
                 "$(sps_csv_escape "$manifest")" \
@@ -387,10 +422,12 @@ sps_finish_output() {
     elif [[ "${QUIET:-false}" != true ]]; then
         local duration=0
         local open_count=0
+        local udp_open_count=0
         [[ -n "${START_TIME:-}" ]] && duration=$(($(date +%s) - START_TIME))
         declare -p OPEN_PORTS > /dev/null 2>&1 && open_count="${#OPEN_PORTS[@]}"
+        declare -p UDP_OPEN_PORTS > /dev/null 2>&1 && udp_open_count="${#UDP_OPEN_PORTS[@]}"
         if ((exit_code == 0)); then
-            success "Scan completed in ${duration}s; ${open_count} open port(s), ${MANIFEST_ENTRY_COUNT:-0} artifact record(s)."
+            success "Scan completed in ${duration}s; ${open_count} TCP and ${udp_open_count} confirmed UDP port(s) open, ${MANIFEST_ENTRY_COUNT:-0} artifact record(s)."
         else
             error "Scan failed with exit code $exit_code${LAST_DIAGNOSTIC:+: $LAST_DIAGNOSTIC}"
         fi

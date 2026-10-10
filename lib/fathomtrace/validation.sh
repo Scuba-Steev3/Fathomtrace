@@ -115,6 +115,7 @@ sps_run_optional_preflight() {
     }
 
     [[ "${ENABLE_SERVICE_DETECT:-false}" == true ]] && sps_optional_tool_check "service detection" nmap || true
+    [[ "${ENABLE_UDP_SCAN:-true}" == true ]] && sps_optional_tool_check "targeted UDP and SNMP discovery" nmap snmpget || true
     sps_optional_tool_check "NetBIOS discovery" nmblookup nbtscan || true
     if [[ "${ENABLE_WEB_ENUM:-false}" == true ]]; then
         sps_optional_tool_check "web enumeration" ffuf || true

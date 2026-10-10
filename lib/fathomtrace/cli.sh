@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # Values are consumed by the sourcing entry point.
 
-SPS_VERSION="2.0.0"
+SPS_VERSION="2.1.0"
 
 sps_cli_defaults() {
     COMMAND="scan"
@@ -10,6 +10,8 @@ sps_cli_defaults() {
     TARGET_DEFAULTED=false
     SCAN_PROFILE="default"
     CUSTOM_PORTS=""
+    ENABLE_UDP_SCAN=true
+    CUSTOM_UDP_PORTS=""
     MAX_JOBS=20
     MAX_JOBS_EXPLICIT=false
     CONNECT_TIMEOUT=0.25
@@ -27,6 +29,12 @@ sps_cli_defaults() {
     SKIP_GUEST_CHECKS=false
     VHOST_DOMAIN=""
     VHOST_WORDLIST="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+    ENABLE_IMAP_ENUM=false
+    ENABLE_IMAP_DUMP=false
+    IMAP_MAILBOX="INBOX"
+    IMAP_MAILBOX_EXPLICIT=false
+    IMAP_MAX_MESSAGES=25
+    IMAP_MAX_MESSAGES_EXPLICIT=false
     LOOT_ENABLED=true
     LOOT_BASE_DIR=""
     OVERWRITE=false
@@ -128,6 +136,24 @@ sps_parse_args() {
                 shift
                 sps_require_value "$option" "${1:-}" || return $?
                 CUSTOM_PORTS="${CUSTOM_PORTS:+$CUSTOM_PORTS,}$1"
+                ;;
+            --udp)
+                ENABLE_UDP_SCAN=true
+                ;;
+            --no-udp)
+                ENABLE_UDP_SCAN=false
+                ;;
+            --udp-ports=*)
+                value="${option#*=}"
+                sps_require_value "--udp-ports" "$value" || return $?
+                CUSTOM_UDP_PORTS="${CUSTOM_UDP_PORTS:+$CUSTOM_UDP_PORTS,}$value"
+                ENABLE_UDP_SCAN=true
+                ;;
+            --udp-ports)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                CUSTOM_UDP_PORTS="${CUSTOM_UDP_PORTS:+$CUSTOM_UDP_PORTS,}$1"
+                ENABLE_UDP_SCAN=true
                 ;;
             --jobs=*)
                 MAX_JOBS="${option#*=}"
@@ -262,6 +288,34 @@ sps_parse_args() {
             --service-detect)
                 ENABLE_SERVICE_DETECT=true
                 ;;
+            --imap-enum)
+                ENABLE_IMAP_ENUM=true
+                ;;
+            --imap-dump)
+                ENABLE_IMAP_ENUM=true
+                ENABLE_IMAP_DUMP=true
+                ;;
+            --imap-mailbox=*)
+                IMAP_MAILBOX="${option#*=}"
+                sps_require_value "--imap-mailbox" "$IMAP_MAILBOX" || return $?
+                IMAP_MAILBOX_EXPLICIT=true
+                ;;
+            --imap-mailbox)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                IMAP_MAILBOX="$1"
+                IMAP_MAILBOX_EXPLICIT=true
+                ;;
+            --imap-max-messages=*)
+                IMAP_MAX_MESSAGES="${option#*=}"
+                IMAP_MAX_MESSAGES_EXPLICIT=true
+                ;;
+            --imap-max-messages)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                IMAP_MAX_MESSAGES="$1"
+                IMAP_MAX_MESSAGES_EXPLICIT=true
+                ;;
             --svc)
                 ENABLE_SERVICE_DETECT=true
                 CLI_DEPRECATIONS+=("--svc is a compatibility alias; prefer --service-detect.")
@@ -365,8 +419,29 @@ sps_parse_args() {
     [[ "$RETRY_LIMIT" =~ ^[0-9]+$ ]] && ((RETRY_LIMIT <= 10)) || {
         sps_cli_fail "--retries must be an integer from 0 through 10." || return $?
     }
+    [[ "$IMAP_MAX_MESSAGES" =~ ^[1-9][0-9]*$ ]] && ((IMAP_MAX_MESSAGES <= 100)) || {
+        sps_cli_fail "--imap-max-messages must be an integer from 1 through 100." || return $?
+    }
+    if [[ "$IMAP_MAILBOX" =~ [[:cntrl:]] ]]; then
+        sps_cli_fail "--imap-mailbox cannot contain control characters." || return $?
+    fi
+    if [[ "$IMAP_MAILBOX_EXPLICIT" == true && "$ENABLE_IMAP_DUMP" != true ]]; then
+        sps_cli_fail "--imap-mailbox requires --imap-dump." || return $?
+    fi
+    if [[ "$IMAP_MAX_MESSAGES_EXPLICIT" == true && "$ENABLE_IMAP_DUMP" != true ]]; then
+        sps_cli_fail "--imap-max-messages requires --imap-dump." || return $?
+    fi
+    if [[ "$ENABLE_IMAP_ENUM" == true && ( -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" ) ]]; then
+        sps_cli_fail "--imap-enum and --imap-dump require both -u/--user and -p/--pass." || return $?
+    fi
+    if [[ "$ENABLE_IMAP_DUMP" == true && "$LOOT_ENABLED" != true ]]; then
+        sps_cli_fail "--imap-dump cannot be combined with --no-loot because message exports are stored as protected artifacts." || return $?
+    fi
     if [[ -n "$CUSTOM_PORTS" && ! "$CUSTOM_PORTS" =~ ^[0-9,-]+$ ]]; then
         sps_cli_fail "--ports accepts comma-separated ports and ranges only." || return $?
+    fi
+    if [[ -n "$CUSTOM_UDP_PORTS" && ! "$CUSTOM_UDP_PORTS" =~ ^[0-9,-]+$ ]]; then
+        sps_cli_fail "--udp-ports accepts comma-separated ports and ranges only." || return $?
     fi
     if [[ -n "$VHOST_DOMAIN" ]]; then
         VHOST_DOMAIN="${VHOST_DOMAIN%.}"
@@ -392,9 +467,9 @@ Usage:
   fathomtrace [scan] [TARGET] [OPTIONS]
   fathomtrace help | --help
 
-Scan one IPv4 address or hostname with a bounded-concurrency common-port
-profile, then run relevant service-enumeration modules. TARGET defaults to
-127.0.0.1 for backward compatibility.
+Scan one IPv4 address or hostname with a bounded-concurrency TCP profile and a
+small targeted UDP profile, then run relevant service-enumeration modules.
+TARGET defaults to 127.0.0.1 for backward compatibility.
 
 Global options:
   -h, --help                  Show this help and exit.
@@ -414,6 +489,10 @@ Scan command options:
                               extended. Last value wins.
       --ports LIST            Scan comma-separated ports/ranges instead of a
                               profile. May be repeated; values are merged.
+      --udp                    Enable the targeted UDP scan (default).
+      --no-udp                 Disable targeted UDP scanning.
+      --udp-ports LIST        Scan selected UDP ports instead of profile
+                              defaults; implies --udp and may be repeated.
       --dry-run               Validate and show the selected operation without
                               connecting to the target or creating loot.
       --vhost                 Enable virtual-host discovery when web ports open.
@@ -423,7 +502,15 @@ Scan command options:
       --web-enum              Enable web content enumeration when applicable.
       --web-wordlist FILE     Use FILE for FFUF content discovery; implies
                               --web-enum. Defaults to SecLists raft-small-words.
-      --service-detect        Run Nmap against discovered open ports only.
+      --service-detect        Run Nmap against discovered TCP and UDP ports.
+      --imap-enum             After a successful encrypted login, list IMAP
+                              mailboxes without selecting them.
+      --imap-dump             Export messages read-only after login; implies
+                              --imap-enum and requires persistent artifacts.
+      --imap-mailbox NAME     Mailbox examined first by --imap-dump; default:
+                              INBOX. Other selectable LIST results follow.
+      --imap-max-messages N   Export at most the newest N messages total across
+                              selectable mailboxes; default: 25, maximum: 100.
       --kerb-enum             Enable Kerberos user enumeration.
       --run-blood             Enable BloodHound collection when prerequisites
                               and credentials are available.
@@ -479,8 +566,11 @@ Examples:
   ./fathomtrace 10.10.10.10
   ./fathomtrace scan dc01.example.test --profile ad --jobs 32
   ./fathomtrace 10.10.10.10 --ports 22,80,443,8000-8010
+  ./fathomtrace 10.10.10.10 --udp-ports 53,123,161,500 --service-detect
   ./fathomtrace dc01.example.test --domain example.test \
       --user analyst --pass 'REPLACE_ME' --kerb-enum --check-certs
+  ./fathomtrace mail.example.test --ports 143,993 -u analyst \
+      -p 'REPLACE_ME' --imap-dump --imap-mailbox INBOX
   ./fathomtrace 10.10.10.10 --format json --no-color --no-loot
   ./fathomtrace 127.0.0.1 --dry-run --debug --ascii
 

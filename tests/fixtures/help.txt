@@ -2,9 +2,9 @@ Usage:
   fathomtrace [scan] [TARGET] [OPTIONS]
   fathomtrace help | --help
 
-Scan one IPv4 address or hostname with a bounded-concurrency common-port
-profile, then run relevant service-enumeration modules. TARGET defaults to
-127.0.0.1 for backward compatibility.
+Scan one IPv4 address or hostname with a bounded-concurrency TCP profile and a
+small targeted UDP profile, then run relevant service-enumeration modules.
+TARGET defaults to 127.0.0.1 for backward compatibility.
 
 Global options:
   -h, --help                  Show this help and exit.
@@ -24,6 +24,10 @@ Scan command options:
                               extended. Last value wins.
       --ports LIST            Scan comma-separated ports/ranges instead of a
                               profile. May be repeated; values are merged.
+      --udp                    Enable the targeted UDP scan (default).
+      --no-udp                 Disable targeted UDP scanning.
+      --udp-ports LIST        Scan selected UDP ports instead of profile
+                              defaults; implies --udp and may be repeated.
       --dry-run               Validate and show the selected operation without
                               connecting to the target or creating loot.
       --vhost                 Enable virtual-host discovery when web ports open.
@@ -33,7 +37,15 @@ Scan command options:
       --web-enum              Enable web content enumeration when applicable.
       --web-wordlist FILE     Use FILE for FFUF content discovery; implies
                               --web-enum. Defaults to SecLists raft-small-words.
-      --service-detect        Run Nmap against discovered open ports only.
+      --service-detect        Run Nmap against discovered TCP and UDP ports.
+      --imap-enum             After a successful encrypted login, list IMAP
+                              mailboxes without selecting them.
+      --imap-dump             Export messages read-only after login; implies
+                              --imap-enum and requires persistent artifacts.
+      --imap-mailbox NAME     Mailbox examined first by --imap-dump; default:
+                              INBOX. Other selectable LIST results follow.
+      --imap-max-messages N   Export at most the newest N messages total across
+                              selectable mailboxes; default: 25, maximum: 100.
       --kerb-enum             Enable Kerberos user enumeration.
       --run-blood             Enable BloodHound collection when prerequisites
                               and credentials are available.
@@ -89,8 +101,11 @@ Examples:
   ./fathomtrace 10.10.10.10
   ./fathomtrace scan dc01.example.test --profile ad --jobs 32
   ./fathomtrace 10.10.10.10 --ports 22,80,443,8000-8010
+  ./fathomtrace 10.10.10.10 --udp-ports 53,123,161,500 --service-detect
   ./fathomtrace dc01.example.test --domain example.test \
       --user analyst --pass 'REPLACE_ME' --kerb-enum --check-certs
+  ./fathomtrace mail.example.test --ports 143,993 -u analyst \
+      -p 'REPLACE_ME' --imap-dump --imap-mailbox INBOX
   ./fathomtrace 10.10.10.10 --format json --no-color --no-loot
   ./fathomtrace 127.0.0.1 --dry-run --debug --ascii
 

@@ -279,7 +279,7 @@ record_loot() {
     [[ "${LOOT_ENABLED:-true}" == true ]] || return 0
     [[ -n "$value" || -n "$evidence" ]] || return 0
 
-    [[ "$kind $value $evidence" =~ [Cc]red|[Pp]ass|[Hh]ash|[Tt]oken|[Kk]ey|[Tt]icket|[Pp][Ff][Xx]|[Cc]cache ]] && sensitive=true
+    [[ "$kind $value $evidence" =~ [Cc]red|[Pp]ass|[Hh]ash|[Tt]oken|[Kk]ey|[Tt]icket|[Pp][Ff][Xx]|[Cc]cache|[Ee]mail.*[Dd]ump ]] && sensitive=true
     if [[ -f "$evidence" ]]; then
         size="$(wc -c < "$evidence" | tr -d '[:space:]')"
         checksum="$(sps_sha256 "$evidence" 2> /dev/null || true)"
@@ -315,7 +315,7 @@ sps_store_artifact() {
     }
 
     checksum="$(sps_sha256 "$source" 2> /dev/null || true)"
-    [[ "$data_class $source_label $source" =~ [Ll]oot|[Cc]red|[Pp]ass|[Hh]ash|[Tt]oken|[Kk]ey|[Tt]icket|[Pp][Ff][Xx]|[Cc]cache ]] && sensitive=true
+    [[ "$data_class $source_label $source" =~ [Ll]oot|[Cc]red|[Pp]ass|[Hh]ash|[Tt]oken|[Kk]ey|[Tt]icket|[Pp][Ff][Xx]|[Cc]cache|[Ee]mail.*[Dd]ump ]] && sensitive=true
     if [[ -n "$checksum" && -n "${SPS_HASH_PATHS[$checksum]+x}" ]]; then
         printf '%s' "${SPS_HASH_PATHS[$checksum]}"
         sps_record_manifest "$source_label" "" "$module" "$(wc -c < "$source" | tr -d '[:space:]')" "$checksum" \

@@ -6,6 +6,8 @@ sps_port_entry() {
         22) printf '22:SSH:open' ;;
         23) printf '23:Telnet:high' ;;
         25) printf '25:SMTP:interesting' ;;
+        465) printf '465:SMTPS:interesting' ;;
+        587) printf '587:SMTP Submission:interesting' ;;
         53) printf '53:DNS:open' ;;
         80) printf '80:HTTP:open' ;;
         88) printf '88:Kerberos:high' ;;
@@ -23,10 +25,12 @@ sps_port_entry() {
         631) printf '631:PRINTER:open' ;;
         636) printf '636:LDAPS:interesting' ;;
         993) printf '993:IMAPS:interesting' ;;
+        995) printf '995:POP3S:interesting' ;;
         1433) printf '1433:SQL Server:high' ;;
         2049) printf '2049:Network File System:high' ;;
         2375) printf '2375:Docker API:high' ;;
         2377) printf '2377:Docker Swarm:interesting' ;;
+        2525) printf '2525:SMTP-Alt:interesting' ;;
         3000) printf '3000:Web Dev:interesting' ;;
         3268) printf '3268:LDAP Global Catalog:interesting' ;;
         3269) printf '3269:LDAPS Global Catalog:interesting' ;;
@@ -89,7 +93,7 @@ sps_configure_ports() {
     else
         case "${SCAN_PROFILE:-default}" in
             default)
-                port_numbers=(21 22 23 25 53 80 88 110 111 135 139 143 389 443 445 515 631 636 993 1433 2049 2375 2377 3000 3306 3389 5000 5985 5986 6379 6443 8080 8443 9090 9100 27017 54925)
+                port_numbers=(21 22 23 25 53 80 88 110 111 135 139 143 389 443 445 465 515 587 631 636 993 995 1433 2049 2375 2377 3000 3306 3389 5000 5985 5986 6379 6443 8080 8443 9090 9100 27017 54925)
                 ;;
             web)
                 port_numbers=(80 443 3000 5000 8000 8008 8080 8443 8888 9000 9090 9443)
@@ -98,7 +102,7 @@ sps_configure_ports() {
                 port_numbers=(53 88 111 135 139 389 445 464 593 636 1433 2049 3268 3269 3389 5985 5986 9389)
                 ;;
             extended)
-                port_numbers=(21 22 23 25 53 80 88 110 111 135 139 143 389 443 445 464 515 593 631 636 993 1433 2049 2375 2377 3000 3268 3269 3306 3389 5000 5432 5900 5985 5986 6379 6443 8000 8008 8080 8443 8888 9000 9090 9100 9389 9443 11211 27017 54925)
+                port_numbers=(21 22 23 25 53 80 88 110 111 135 139 143 389 443 445 464 465 515 587 593 631 636 993 995 1433 2049 2375 2377 2525 3000 3268 3269 3306 3389 5000 5432 5900 5985 5986 6379 6443 8000 8008 8080 8443 8888 9000 9090 9100 9389 9443 11211 27017 54925)
                 ;;
         esac
     fi
@@ -130,6 +134,21 @@ sps_classify_open_port() {
     local port="$1"
     case "$port" in
         21) printf 'FTP\n' >> "$HINT_FILE" ;;
+        25 | 465 | 587 | 2525)
+            printf 'SMTP\n' >> "$HINT_FILE"
+            printf '%s\n' "$port" >> "$SMTP_MARKER"
+            SMTP_PORT_OPEN=true
+            ;;
+        110 | 995)
+            printf 'POP3\n' >> "$HINT_FILE"
+            printf '%s\n' "$port" >> "$POP3_MARKER"
+            POP3_PORT_OPEN=true
+            ;;
+        143 | 993)
+            printf 'IMAP\n' >> "$HINT_FILE"
+            printf '%s\n' "$port" >> "$IMAP_MARKER"
+            IMAP_PORT_OPEN=true
+            ;;
         53) printf 'DNS\n' >> "$HINT_FILE" ;;
         80 | 443 | 3000 | 5000 | 8000 | 8008 | 8080 | 8443 | 8888 | 9000 | 9090 | 9443)
             printf 'WEB\n' >> "$HINT_FILE"
@@ -282,6 +301,13 @@ sps_probe_open_port() {
     fi
 }
 
+sps_run_service_probes() {
+    local port
+    for port in "$@"; do
+        sps_probe_open_port "$port" || debug "Optional discovery probe failed for port $port"
+    done
+}
+
 run_port_scan() {
     local target="$1"
     shift
@@ -293,7 +319,7 @@ run_port_scan() {
 
     result_dir="$(mktemp -d "$RUNTIME_TMP_DIR/port-results.XXXXXX")"
     sps_section "Running Port Scan"
-    info "Scanning ${#entries[@]} port(s) with ${MAX_JOBS} worker(s), ${CONNECT_TIMEOUT}s timeout, ${RETRY_LIMIT} retry/retries"
+    info "Scanning ${#entries[@]} TCP port(s) with ${MAX_JOBS} worker(s), ${CONNECT_TIMEOUT}s timeout, ${RETRY_LIMIT} retry/retries"
 
     for entry in "${entries[@]}"; do
         IFS=: read -r port service level <<< "$entry"
@@ -326,19 +352,24 @@ run_port_scan() {
         sps_classify_open_port "$port"
     done
 
-    for port in "${OPEN_PORTS[@]}"; do
-        sps_probe_open_port "$port" || debug "Optional discovery probe failed for port $port"
-    done
 }
 
 sps_print_dry_run() {
     local port_list=""
+    local udp_port_list=""
     local entry port
     for entry in "${PORTS[@]}"; do
         IFS=: read -r port _ <<< "$entry"
         port_list+="${port_list:+,}$port"
     done
+    if [[ "${ENABLE_UDP_SCAN:-true}" == true ]]; then
+        for port in "${UDP_PORTS[@]:-}"; do
+            [[ -n "$port" ]] && udp_port_list+="${udp_port_list:+,}$port"
+        done
+    else
+        udp_port_list="disabled"
+    fi
     info "Dry run: command=$COMMAND target=${ORIGINAL_TARGET:-$TARGET} resolved=${TARGET_IPV4:-unresolved}"
-    info "Dry run: profile=$SCAN_PROFILE ports=$port_list jobs=$MAX_JOBS timeout=$CONNECT_TIMEOUT retries=$RETRY_LIMIT"
+    info "Dry run: profile=$SCAN_PROFILE tcp-ports=$port_list udp-ports=${udp_port_list:-none} jobs=$MAX_JOBS timeout=$CONNECT_TIMEOUT retries=$RETRY_LIMIT"
     info "Dry run: loot=$LOOT_ENABLED format=$OUTPUT_FORMAT optional-preflight=$([[ "$SKIP_PREFLIGHT" == true ]] && printf disabled || printf enabled)"
 }
