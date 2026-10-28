@@ -15,6 +15,20 @@ All notable changes to this repository will be documented in this file.
 
 ### Changed
 
+- Raised the application version to 2.1.1 for BloodHound CE support and the
+  optional DACL-audit bypass.
+- Promoted successful IMAP authentication into both the Attack Path Decision
+  Engine and Recon Summary, including the accepted user and TLS port.
+- Added exported IMAP message findings to the Attack Path Decision Engine when
+  the export count is greater than zero, including the protected loot path and
+  targeted review and retention next steps.
+- Grouped Service Exposure Checks into visually separated SMTP, POP3, IMAP,
+  authenticated mailbox, and SNMP blocks with concise descriptions and
+  per-endpoint subheaders matching the existing AD enumeration hierarchy.
+- Kept the `Running Port Scan` phase limited to concurrent TCP reachability and
+  concise open-port results. Protocol probes, mail banners and capabilities,
+  TLS certificates, authentication checks, and enumeration now appear under a
+  separate `Service Exposure Checks` phase.
 - Fixed automatic color detection by no longer shadowing the standard
   `NO_COLOR` environment variable with a non-empty internal value.
 - Added standard `NO_COLOR`, `CLICOLOR`, and `CLICOLOR_FORCE` handling while
@@ -54,6 +68,26 @@ All notable changes to this repository will be documented in this file.
 - Added `--skip-dacl-audit` to bypass both the targeted Impacket DACL review and
   the directory-wide bloodyAD writable-object audit while keeping both enabled
   by default.
+- Added profile-aware targeted UDP scanning, `--udp-ports` overrides, and a
+  `--no-udp` opt-out. UDP results distinguish confirmed `open` listeners from
+  inconclusive `open|filtered` candidates.
+- Added SNMP/161 discovery with a bounded, read-only SNMPv2c `sysDescr.0`
+  request using the common `public` community, device-description reporting,
+  and targeted UDP Nmap service detection for discovered candidates.
+- Added automatic certificate capture and parsing for SMTP, POP3, and IMAP over
+  implicit TLS or advertised STARTTLS/STLS, including CN fallback when a
+  certificate has no Subject Alternative Name extension.
+- Added copy-ready OpenSSL connection guidance when IMAP STARTTLS or implicit
+  TLS is confirmed, including SNI and safe interactive-session reminders.
+- Added one-attempt IMAP credential validation using explicit `-u/-p` values,
+  restricted to implicit TLS or confirmed STARTTLS with password-redacted
+  evidence and no mailbox access.
+- Added opt-in authenticated IMAP mailbox enumeration and bounded message
+  export. The dump examines the preferred mailbox first, continues through all
+  selectable `LIST` results while skipping `\Noselect` containers, and keeps a
+  global message limit. Mailboxes are opened with `EXAMINE`, messages use
+  `BODY.PEEK[]`, and exports are stored as sensitive artifacts without
+  persisting passwords.
 - Added bounded NetExec (`nxc rdp`/`netexec rdp`) credential validation when
   TCP/3389 is open and explicit credentials are supplied. The single-target
   command is recorded in command artifacts, the summary reports

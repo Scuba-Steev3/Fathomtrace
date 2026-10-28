@@ -1,53 +1,48 @@
 #!/usr/bin/env bash
 
-# Normalize directory-wide effective WriteOwner results from bloodyAD output.
-# Output fields: target DN|object type|right
+# Parse bloodyAD writable-object records and emit only explicit WriteOwner
+# rights as distinguished-name|object-type|right tuples.
 sps_parse_bloodyad_writeowner() {
     awk '
-        function classify_target(target, lower_target) {
-            lower_target=tolower(target)
-
-            if (lower_target ~ /,cn=policies,cn=system,/) return "GPO"
-            if (lower_target ~ /^ou=/) return "OU"
-            if (lower_target ~ /^dc=/) return "DOMAIN"
-            if (lower_target ~ /^cn=/) return "DIRECTORY_OBJECT"
-            return "UNKNOWN"
-        }
-
-        function emit_target() {
-            if (target_dn != "" && write_owner) {
-                print target_dn "|" classify_target(target_dn) "|WriteOwner"
+        function emit_record(upper_dn, object_type) {
+            if (dn == "" || !write_owner) return
+            upper_dn=toupper(dn)
+            if (upper_dn ~ /^CN=\{[0-9A-F-]+\},CN=POLICIES,CN=SYSTEM,/) {
+                object_type="GPO"
+            } else if (upper_dn ~ /^OU=/) {
+                object_type="OU"
+            } else if (upper_dn ~ /^CN=/) {
+                object_type="Object"
+            } else {
+                object_type="DirectoryObject"
             }
-
-            target_dn=""
-            write_owner=0
+            print dn "|" object_type "|WriteOwner"
         }
 
-        /^[[:space:]]*distinguishedName[[:space:]]*:/ {
-            emit_target()
-            target_dn=$0
-            sub(/^[[:space:]]*distinguishedName[[:space:]]*:[[:space:]]*/, "", target_dn)
-            sub(/\r$/, "", target_dn)
+        /^[[:space:]]*$/ {
+            emit_record()
+            dn=""
+            write_owner=0
+            next
+        }
+
+        /^[[:space:]]*[Dd]istinguished[Nn]ame:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]*[Dd]istinguished[Nn]ame:[[:space:]]*/, "", line)
+            dn=line
             next
         }
 
         {
-            line=tolower($0)
-
-            # bloodyAD get writable reports effective WRITE_OWNER as
-            # "OWNER: WRITE". Also accept names emitted by ACL/BloodHound
-            # tooling so the parser remains useful across supported versions.
-            if (line ~ /^[[:space:]]*owner[[:space:]]*:[[:space:]]*write([[:space:]]|$)/ ||
-                line ~ /write[_ -]?owner/ ||
-                line ~ /right_write_owner/) {
+            upper=toupper($0)
+            if (upper ~ /OWNER:[[:space:]]*WRITE([[:space:]]|$)/ ||
+                upper ~ /WRITE[_ -]OWNER([[:space:]]|$)/) {
                 write_owner=1
             }
         }
 
-        END {
-            emit_target()
-        }
-    ' | sort -u
+        END { emit_record() }
+    '
 }
 
 # Run both read-only writable-object audits unless the operator opts out.

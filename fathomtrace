@@ -5,18 +5,19 @@
 # Bash Recon and Service Enumeration Helper
 #
 # Purpose:
-#   Perform a bounded-concurrency TCP connect scan against a curated service
-#   profile, then run optional service-specific enumeration and produce
-#   evidence-based findings and suggested next steps.
+#   Perform a bounded-concurrency TCP connect scan plus a small targeted UDP
+#   scan, then run optional service-specific enumeration and produce evidence-
+#   based findings and suggested next steps.
 #
 # Implemented capabilities:
 #   - Concurrent TCP connect scanning of common infrastructure and AD ports
+#   - Targeted UDP discovery with SNMP/161 response and device identity checks
 #   - Optional Nmap service, version, script, and OS detection
 #   - Reverse-DNS, NetBIOS, LDAP RootDSE, TLS SAN, and HTTP redirect hostname discovery
 #   - HTTP/HTTPS redirect analysis, directory enumeration, and VHost discovery
 #   - DNS enumeration, AXFR testing, and optional subdomain brute forcing
-#   - FTP, SMB, RPC, LDAP/LDAPS, Kerberos, MSSQL, NFS, Docker, Redis,
-#     Kubernetes, RDP, WinRM, database, and printer-service checks
+#   - FTP, SMTP, POP3, IMAP, SMB, RPC, LDAP/LDAPS, Kerberos, MSSQL, NFS,
+#     Docker, Redis, Kubernetes, RDP, WinRM, database, and printer-service checks
 #   - Anonymous, guest, and authenticated SMB/LDAP access validation
 #   - Optional AS-REP Roasting and Kerberoasting assessment
 #   - Optional BloodHound data collection
@@ -127,11 +128,16 @@ source "$FATHOMTRACE_LIB_DIR/output.sh"
 source "$FATHOMTRACE_LIB_DIR/validation.sh"
 source "$FATHOMTRACE_LIB_DIR/loot.sh"
 source "$FATHOMTRACE_LIB_DIR/scan.sh"
+source "$FATHOMTRACE_LIB_DIR/udp.sh"
 source "$FATHOMTRACE_LIB_DIR/netbios.sh"
 source "$FATHOMTRACE_LIB_DIR/rdp.sh"
 source "$FATHOMTRACE_LIB_DIR/smb.sh"
 source "$FATHOMTRACE_LIB_DIR/ldap.sh"
 source "$FATHOMTRACE_LIB_DIR/ad_acl.sh"
+source "$FATHOMTRACE_LIB_DIR/mail.sh"
+source "$FATHOMTRACE_LIB_DIR/smtp.sh"
+source "$FATHOMTRACE_LIB_DIR/pop3.sh"
+source "$FATHOMTRACE_LIB_DIR/imap.sh"
 
 DEFAULT_TARGET="127.0.0.1"
 AUTH_USER_DN=""
@@ -243,6 +249,28 @@ KERBEROS_ACCESS_CONFIRMED=false
 SMB_PORT_OPEN=false
 SMB_SERVICE_CONFIRMED=false
 SMB_ACCESS_CONFIRMED=false
+SMTP_PORT_OPEN=false
+SMTP_SERVICE_CONFIRMED=false
+SMTP_HOSTNAME=""
+POP3_PORT_OPEN=false
+POP3_SERVICE_CONFIRMED=false
+POP3_HOSTNAME=""
+IMAP_PORT_OPEN=false
+IMAP_SERVICE_CONFIRMED=false
+IMAP_HOSTNAME=""
+IMAP_AUTH_OK=false
+IMAP_AUTH_STATUS="skipped"
+IMAP_AUTH_PORT=""
+IMAP_AUTH_TRANSPORT=""
+IMAP_DUMP_MESSAGES_EXPORTED=0
+IMAP_DUMP_MAILBOXES_EXAMINED=0
+IMAP_DUMP_MAILBOXES_FAILED=0
+IMAP_DUMP_SUMMARY=""
+IMAP_DUMP_LOOT_PATH=""
+SNMP_PORT_OPEN=false
+SNMP_SERVICE_CONFIRMED=false
+SNMP_PUBLIC_ACCESS_CONFIRMED=false
+SNMP_SYS_DESCR=""
 NETBIOS_DETECTED=false
 NETBIOS_NAME=""
 NETBIOS_WORKGROUP=""
@@ -335,9 +363,7 @@ FOUND_ESCALATION_PRIVS=()
 AUTH_USER=""
 AUTH_PASS=""
 AUTH_DOMAIN=""
-AUTH_NTLM_HASH=""
 CREDS_PROVIDED=false
-NTLM_HASH_PROVIDED=false
 
 # --------- Concurrency ----------
 MAX_JOBS=20
@@ -374,10 +400,21 @@ WEB_SERVICES_FILE="$RUNTIME_TMP_DIR/web-services"
 SMB_MARKER="$RUNTIME_TMP_DIR/smb"
 KERB_MARKER="$RUNTIME_TMP_DIR/kerberos"
 LDAP_MARKER="$RUNTIME_TMP_DIR/ldap"
+SMTP_MARKER="$RUNTIME_TMP_DIR/smtp"
+SMTP_CONFIRMED_FILE="$RUNTIME_TMP_DIR/smtp-confirmed"
+POP3_MARKER="$RUNTIME_TMP_DIR/pop3"
+POP3_CONFIRMED_FILE="$RUNTIME_TMP_DIR/pop3-confirmed"
+IMAP_MARKER="$RUNTIME_TMP_DIR/imap"
+IMAP_CONFIRMED_FILE="$RUNTIME_TMP_DIR/imap-confirmed"
 OPEN_PORTS_FILE="$RUNTIME_TMP_DIR/open-ports"
+UDP_OPEN_PORTS_FILE="$RUNTIME_TMP_DIR/udp-open-ports"
+UDP_POSSIBLE_PORTS_FILE="$RUNTIME_TMP_DIR/udp-possible-ports"
 touch "$HINT_FILE" "$HOSTS_FILE" "$DISCOVERED_HOSTS" "$REDIRECT_HOSTS" \
     "$HTTP_MARKER" "$HTTPS_MARKER" "$SMB_MARKER" "$KERB_MARKER" \
-    "$LDAP_MARKER" "$OPEN_PORTS_FILE" "$WEB_SERVICES_FILE"
+    "$LDAP_MARKER" "$SMTP_MARKER" "$SMTP_CONFIRMED_FILE" \
+    "$POP3_MARKER" "$POP3_CONFIRMED_FILE" "$IMAP_MARKER" "$IMAP_CONFIRMED_FILE" \
+    "$OPEN_PORTS_FILE" "$UDP_OPEN_PORTS_FILE" "$UDP_POSSIBLE_PORTS_FILE" \
+    "$WEB_SERVICES_FILE"
 
 sps_cleanup_runtime() {
     local exit_code=$?
@@ -417,8 +454,8 @@ service_version_detection() {
     fi
 
     if [ ! -s "$OPEN_PORTS_FILE" ]; then
-        warn "No open ports available for service/version detection"
-        record_module_status "service-detect" "skipped" "no open ports"
+        warn "No open TCP ports available for TCP service/version detection"
+        record_module_status "service-detect" "skipped" "no open TCP ports"
         return 1
     fi
 
@@ -605,7 +642,7 @@ dc_auth_check() {
     ########################################
     # Credential Validation Only
     ########################################
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
         echo -e "        ${GREEN}$LDAP_TOOL ldap '$dc' -u '$user' -p '$(sps_secret_value "$pass")' -d '$domain' --no-bruteforce --continue-on-success${RESET}"
         OUT=$($LDAP_TOOL ldap "$dc" \
@@ -644,11 +681,7 @@ gather_bloodhound() {
     local -a bh_args=()
 
     info "Starting BloodHound data collection"
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        sps_report_module_outcome "bloodhound" "skipped" "this collector path does not support NTLM-hash authentication"
-        return 0
-    fi
-    if [[ -z "${AUTH_USER:-}" ]] || [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" ]]; then
         sps_report_module_outcome "bloodhound" "skipped" "credentials are required"
         return 1
     fi
@@ -1040,16 +1073,20 @@ nxc_enum_users() {
 
 export_authenticated_user_groups() {
     local DATE_TAG USER_GROUPS_CSV USER_GROUPS_TXT RAW_GROUPS_FULL
-    local BIND_DN NETEXEC_GROUP_OUTPUT
+    local BIND_DN
 
     if [[ "$LDAP_BIND_TYPE" != "auth" ]]; then
         info "Skipping authenticated user group export — no authenticated LDAP bind"
         return 0
     fi
 
-    if [[ -z "${AUTH_USER:-}" || -z "${LDAP_DOMAIN:-}" || -z "${LDAP_BASE_DN:-}" ]] ||
-       [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
-        warn "Missing authenticated credential, username, LDAP domain, or base DN — skipping group export"
+    if [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" || -z "${LDAP_DOMAIN:-}" || -z "${LDAP_BASE_DN:-}" ]]; then
+        warn "Missing AUTH_USER / AUTH_PASS / LDAP_DOMAIN / LDAP_BASE_DN — skipping group export"
+        return 1
+    fi
+
+    if ! command -v ldapsearch >/dev/null 2>&1; then
+        warn "ldapsearch not found — skipping authenticated user group export"
         return 1
     fi
 
@@ -1064,40 +1101,28 @@ export_authenticated_user_groups() {
     USER_GROUPS_TXT="user_groups_${AUTH_USER}_${TARGET_IPV4}_${DATE_TAG}.txt"
 
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 -d '$LDAP_DOMAIN' -u '$AUTH_USER' -H '$MASKED_NTLM_HASH' --query '(sAMAccountName=${AUTH_USER})' distinguishedName memberOf${RESET}"
-        NETEXEC_GROUP_OUTPUT=$($LDAP_TOOL ldap "$TARGET_IPV4" -d "$LDAP_DOMAIN" -u "$AUTH_USER" -H "$AUTH_NTLM_HASH" \
-            --query "(sAMAccountName=${AUTH_USER})" distinguishedName memberOf 2>/dev/null)
-        AUTH_USER_DN=$(sed -nE 's/^.*distinguishedName:[[:space:]]*//p' <<< "$NETEXEC_GROUP_OUTPUT" | head -n 1)
-        mapfile -t AUTH_USER_GROUP_DNS < <(
-            sed -nE 's/^.*memberOf:[[:space:]]*//p' <<< "$NETEXEC_GROUP_OUTPUT" | sort -u
-        )
-    else
-        if ! command -v ldapsearch >/dev/null 2>&1; then
-            warn "ldapsearch not found — skipping authenticated user group export"
-            return 1
-        fi
-        echo -e "        ${GREEN}ldapsearch -LLL -x -H ldap://$TARGET_IPV4 -D '$BIND_DN' -w '$MASKED_AUTH_PASS' -b '$LDAP_BASE_DN' '(sAMAccountName=${AUTH_USER})' distinguishedName memberOf${RESET}"
-        AUTH_USER_DN=$(
-            ldapsearch -LLL -x \
-                -H "ldap://$TARGET_IPV4" \
-                -D "$BIND_DN" \
-                -w "$AUTH_PASS" \
-                -b "$LDAP_BASE_DN" \
-                "(sAMAccountName=${AUTH_USER})" distinguishedName 2>/dev/null \
-            | awk -F': ' '/^distinguishedName: / {print $2; exit}'
-        )
-        mapfile -t AUTH_USER_GROUP_DNS < <(
-            ldapsearch -LLL -x \
-                -H "ldap://$TARGET_IPV4" \
-                -D "$BIND_DN" \
-                -w "$AUTH_PASS" \
-                -b "$LDAP_BASE_DN" \
-                "(sAMAccountName=${AUTH_USER})" memberOf 2>/dev/null \
-            | awk -F': ' '/^memberOf: / {print $2}' \
-            | sort -u
-        )
-    fi
+    echo -e "        ${GREEN}ldapsearch -LLL -x -H ldap://$TARGET_IPV4 -D '$BIND_DN' -w '$MASKED_AUTH_PASS' -b '$LDAP_BASE_DN' '(sAMAccountName=${AUTH_USER})' distinguishedName memberOf${RESET}"
+
+    AUTH_USER_DN=$(
+        ldapsearch -LLL -x \
+            -H "ldap://$TARGET_IPV4" \
+            -D "$BIND_DN" \
+            -w "$AUTH_PASS" \
+            -b "$LDAP_BASE_DN" \
+            "(sAMAccountName=${AUTH_USER})" distinguishedName 2>/dev/null \
+        | awk -F': ' '/^distinguishedName: / {print $2; exit}'
+    )
+
+    mapfile -t AUTH_USER_GROUP_DNS < <(
+        ldapsearch -LLL -x \
+            -H "ldap://$TARGET_IPV4" \
+            -D "$BIND_DN" \
+            -w "$AUTH_PASS" \
+            -b "$LDAP_BASE_DN" \
+            "(sAMAccountName=${AUTH_USER})" memberOf 2>/dev/null \
+        | awk -F': ' '/^memberOf: / {print $2}' \
+        | sort -u
+    )
 
     AUTH_USER_GROUP_NAMES=()
     for group_dn in "${AUTH_USER_GROUP_DNS[@]}"; do
@@ -1157,9 +1182,8 @@ run_impacket_dacl_audit() {
         return 0
     fi
 
-    if [[ -z "${AUTH_USER:-}" || -z "${LDAP_DOMAIN:-}" || -z "${LDAP_BASE_DN:-}" ]] ||
-       [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
-        warn "Missing authenticated credential, username, LDAP domain, or base DN — skipping DACL audit"
+    if [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" || -z "${LDAP_DOMAIN:-}" || -z "${LDAP_BASE_DN:-}" ]]; then
+        warn "Missing AUTH_USER / AUTH_PASS / LDAP_DOMAIN / LDAP_BASE_DN — skipping DACL audit"
         return 1
     fi
 
@@ -1168,7 +1192,7 @@ run_impacket_dacl_audit() {
         return 0
     fi
 
-    if [[ -z "${AUTH_NTLM_HASH:-}" ]] && ! command -v ldapsearch >/dev/null 2>&1; then
+    if ! command -v ldapsearch >/dev/null 2>&1; then
         warn "ldapsearch not found — skipping DACL audit"
         return 1
     fi
@@ -1186,20 +1210,16 @@ run_impacket_dacl_audit() {
         notify "No cached group DNs available for ${AUTH_USER}"
     fi
 
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        USER_GROUP_DNS=("${AUTH_USER_GROUP_DNS[@]}")
-    else
-        mapfile -t USER_GROUP_DNS < <(
-            ldapsearch -LLL -x \
-                -H "ldap://$TARGET_IPV4" \
-                -D "$BIND_DN" \
-                -w "$AUTH_PASS" \
-                -b "$LDAP_BASE_DN" \
-                "(sAMAccountName=${AUTH_USER})" memberOf 2>/dev/null \
-            | awk -F': ' '/^memberOf: / {print $2}' \
-            | sort -u
-        )
-    fi
+    mapfile -t USER_GROUP_DNS < <(
+        ldapsearch -LLL -x \
+            -H "ldap://$TARGET_IPV4" \
+            -D "$BIND_DN" \
+            -w "$AUTH_PASS" \
+            -b "$LDAP_BASE_DN" \
+            "(sAMAccountName=${AUTH_USER})" memberOf 2>/dev/null \
+        | awk -F': ' '/^memberOf: / {print $2}' \
+        | sort -u
+    )
 
     DATE_TAG=$(date +"%Y%m%d_%H%M%S")
     OUT_DIR="dacledit_${TARGET_IPV4}_${DATE_TAG}"
@@ -1242,24 +1262,16 @@ run_impacket_dacl_audit() {
             outfile="$OUT_DIR/${principal_name}__${target_name}.txt"
 
             echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-            if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-                echo -e "        ${GREEN}$DACL_TOOL -action read -principal-dn '$principal_dn' -target-dn '$target_dn' -dc-ip '$TARGET_IPV4' -hashes ':$MASKED_NTLM_HASH' '${LDAP_DOMAIN}/${AUTH_USER}'${RESET}"
-                cmd_out=$(timeout 20 "$DACL_TOOL" \
+            echo -e "        ${GREEN}$DACL_TOOL -action read -principal-dn '$principal_dn' -target-dn '$target_dn' -dc-ip '$TARGET_IPV4' '${LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}'${RESET}"
+
+            cmd_out=$(
+                timeout 20 "$DACL_TOOL" \
                     -action read \
                     -principal-dn "$principal_dn" \
                     -target-dn "$target_dn" \
                     -dc-ip "$TARGET_IPV4" \
-                    -hashes ":$AUTH_NTLM_HASH" \
-                    "${LDAP_DOMAIN}/${AUTH_USER}" 2>&1)
-            else
-                echo -e "        ${GREEN}$DACL_TOOL -action read -principal-dn '$principal_dn' -target-dn '$target_dn' -dc-ip '$TARGET_IPV4' '${LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}'${RESET}"
-                cmd_out=$(timeout 20 "$DACL_TOOL" \
-                    -action read \
-                    -principal-dn "$principal_dn" \
-                    -target-dn "$target_dn" \
-                    -dc-ip "$TARGET_IPV4" \
-                    "${LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" 2>&1)
-            fi
+                    "${LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" 2>&1
+            )
 
             printf "%s\n" "$cmd_out" > "$outfile"
 
@@ -1345,33 +1357,21 @@ run_bloodyad_writable_audit() {
             -k "ccache=$KRB5CCNAME"
         )
     else
-        if [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
-            warn "No usable Kerberos ccache, password, or NTLM hash available"
+        if [[ -z "${AUTH_PASS:-}" ]]; then
+            warn "No usable Kerberos ccache or password available"
             return 1
         fi
 
-        if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-            info "Using NTLM hash authentication for bloodyAD"
-            bad_cmd=(
-                bloodyad
-                -H "$dc_host"
-                -i "$TARGET_IPV4"
-                -d "$LDAP_DOMAIN"
-                -u "$AUTH_USER"
-                -p ":$AUTH_NTLM_HASH"
-            )
-        else
-            info "Using username/password authentication for bloodyAD"
+        info "Using username/password authentication for bloodyAD"
 
-            bad_cmd=(
-                bloodyad
-                -H "$dc_host"
-                -i "$TARGET_IPV4"
-                -d "$LDAP_DOMAIN"
-                -u "$AUTH_USER"
-                -p "$AUTH_PASS"
-            )
-        fi
+        bad_cmd=(
+            bloodyad
+            -H "$dc_host"
+            -i "$TARGET_IPV4"
+            -d "$LDAP_DOMAIN"
+            -u "$AUTH_USER"
+            -p "$AUTH_PASS"
+        )
     fi
 
     echo
@@ -1395,7 +1395,7 @@ run_bloodyad_writable_audit() {
     set -e
     
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-    echo -e "        ${GREEN}$(sps_redact "${bad_cmd[*]} get writable --detail") ${RESET}"
+    echo -e "        ${GREEN}${bad_cmd[*]} get writable --detail ${RESET}"
     
     if [[ $rc -ne 0 ]]; then
         warn "bloodyad writable audit failed with exit code $rc"
@@ -1574,7 +1574,7 @@ gather_spn_accounts() {
     SPN_QUERY_EVIDENCE=""
     SPN_ACCOUNT_MAPPINGS=()
 
-    if [[ -z "${AUTH_USER:-}" ]] || [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" ]]; then
         warn "SPN enumeration requires authenticated LDAP credentials"
         return 1
     fi
@@ -1596,9 +1596,7 @@ gather_spn_accounts() {
 
     case "${requested_mode,,}" in
         auto)
-            if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-                auth_mode="hash"
-            elif [[ "${NTLM_ENABLED:-false}" == true ]]; then
+            if [[ "${NTLM_ENABLED:-false}" == true ]]; then
                 auth_mode="ntlm"
             else
                 auth_mode="kerberos"
@@ -1610,9 +1608,6 @@ gather_spn_accounts() {
         ntlm|password)
             auth_mode="ntlm"
             ;;
-        hash|ntlm-hash)
-            auth_mode="hash"
-            ;;
         *)
             warn "Unsupported SPN query authentication mode: $requested_mode"
             return 1
@@ -1623,17 +1618,15 @@ gather_spn_accounts() {
         query_target="$(get_preferred_dc_host "$query_target")"
     fi
 
-    cmd=("$tool" ldap "$query_target" -d "$domain" -u "$AUTH_USER")
-    display_cmd=("$tool" ldap "$query_target" -d "$domain" -u "$AUTH_USER")
-    if [[ "$auth_mode" == hash ]]; then
-        cmd+=(-H "$AUTH_NTLM_HASH")
-        display_cmd+=(-H "$MASKED_NTLM_HASH")
-    else
-        cmd+=(-p "$AUTH_PASS")
-        display_cmd+=(-p "$MASKED_AUTH_PASS")
-    fi
+    cmd=(
+        "$tool" ldap "$query_target"
+        -d "$domain"
+        -u "$AUTH_USER"
+        -p "$AUTH_PASS"
+    )
     [[ "$auth_mode" == kerberos ]] && cmd+=( -k )
     cmd+=( --query "$ldap_filter" "$ldap_attributes" )
+    display_cmd=("$tool" ldap "$query_target" -d "$domain" -u "$AUTH_USER" -p "$MASKED_AUTH_PASS")
     [[ "$auth_mode" == kerberos ]] && display_cmd+=( -k )
     display_cmd+=( --query "$ldap_filter" "$ldap_attributes" )
     repeatable="$(sps_shell_join "${display_cmd[@]}")"
@@ -1950,19 +1943,7 @@ ldap_enum() {
     #echo "[DEBUG] NTLM_ENABLED='$NTLM_ENABLED'"
     #echo "[DEBUG] USE_AUTH='$USE_AUTH'"
     #echo "[DEBUG] CREDS_PROVIDED='$CREDS_PROVIDED'"
-    if [[ "$USE_AUTH" == "auth" && "$NTLM_HASH_PROVIDED" == true ]]; then
-        info "Testing authenticated LDAP bind with the supplied NTLM hash"
-        echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 -d $LDAP_DOMAIN -u '$AUTH_USER' -H '$MASKED_NTLM_HASH'${RESET}"
-        AUTH_OUT=$($LDAP_TOOL ldap "$TARGET_IPV4" -d "$LDAP_DOMAIN" -u "$AUTH_USER" -H "$AUTH_NTLM_HASH" 2>&1)
-
-        if echo "$AUTH_OUT" | grep -Eq '^\s*LDAP\s+.*\[\+\]'; then
-            LDAP_AUTH_BIND=true
-            success "Authenticated LDAP bind using NTLM hash successful"
-        else
-            warn "Authenticated LDAP bind using NTLM hash failed"
-        fi
-    elif [[ "$USE_AUTH" == "auth" && "$CREDS_PROVIDED" == true && $NTLM_ENABLED == true ]]; then
+    if [[ "$USE_AUTH" == "auth" && "$CREDS_PROVIDED" == true && $NTLM_ENABLED == true ]]; then
         info "Testing Authenticated LDAP bind ($AUTH_USER|$MASKED_AUTH_PASS)"
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
 	echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 -d $LDAP_DOMAIN -u '$AUTH_USER' -p '$MASKED_AUTH_PASS'${RESET}"
@@ -1991,26 +1972,17 @@ ldap_enum() {
     # 3. Select Best Available Bind
     ########################################
     LDAP_EXEC_ARGS=()
-    LDAP_DISPLAY_ARGS=()
     LDAP_BIND_TYPE=""
 
     if [[ "$LDAP_AUTH_BIND" == true ]]; then
         LDAP_BIND_TYPE="auth"
-        if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-            LDAP_EXEC_ARGS=(-d "$LDAP_DOMAIN" -u "$AUTH_USER" -H "$AUTH_NTLM_HASH")
-            LDAP_DISPLAY_ARGS=(-d "$LDAP_DOMAIN" -u "$AUTH_USER" -H "$MASKED_NTLM_HASH")
-        else
-            LDAP_EXEC_ARGS=(-d "$LDAP_DOMAIN" -u "$AUTH_USER" -p "$AUTH_PASS")
-            LDAP_DISPLAY_ARGS=(-d "$LDAP_DOMAIN" -u "$AUTH_USER" -p "$MASKED_AUTH_PASS")
-        fi
+        LDAP_EXEC_ARGS=(-d "$LDAP_DOMAIN" -u "$AUTH_USER" -p "$AUTH_PASS")
     elif [[ "$LDAP_GUEST_BIND" == true ]]; then
         LDAP_BIND_TYPE="guest"
         LDAP_EXEC_ARGS=(-d "$LDAP_DOMAIN" -u "guest" -p "")
-        LDAP_DISPLAY_ARGS=(-d "$LDAP_DOMAIN" -u "guest" -p "")
     elif [[ "$LDAP_ANON_BIND" == true ]]; then
         LDAP_BIND_TYPE="anon"
         LDAP_EXEC_ARGS=(--anonymous)
-        LDAP_DISPLAY_ARGS=(--anonymous)
     else
         notify "LDAP service present but no usable bind available"
         set -e
@@ -2024,7 +1996,7 @@ ldap_enum() {
         export_authenticated_user_groups || true
     fi
 
-    if [[ $NTLM_ENABLED == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ $NTLM_ENABLED == true ]]; then
         success "Using NTLM LDAP bind type: ${BLUE}$LDAP_BIND_TYPE${RESET}"
     else
         success "Using Kerberos LDAP bind type: ${BLUE}$LDAP_BIND_TYPE${RESET}"
@@ -2037,9 +2009,9 @@ ldap_enum() {
     LDAP_USERS_TMP="users_${TARGET_IPV4}_${DATE_TAG}.txt"
     LDAP_USERS_CSV="users_${TARGET_IPV4}_${DATE_TAG}.csv"
     info "Enumerating Users via LDAP..."
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} --users${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} --users${RESET}"
         #mapfile -t LDAP_USERS < <(
             #$LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --users 2>/dev/null \
             #    | sed -nE '
@@ -2051,7 +2023,7 @@ ldap_enum() {
             #    | sort -u
         #)
         mapfile -t LDAP_USERS < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --users 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --users 2>/dev/null \
                 | awk '
                     $1 == "LDAP" && $5 != "-Username-" && $5 != "" && $5 !~ /^\[|\]/ {
                         print $5
@@ -2062,9 +2034,9 @@ ldap_enum() {
         )
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k --users${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k --users${RESET}"
         mapfile -t LDAP_USERS < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --users 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --users 2>/dev/null \
                 | awk '
                     $1 == "LDAP" && $5 != "-Username-" && $5 != "" && $5 !~ /^\[|\]/ {
                         print $5
@@ -2104,9 +2076,9 @@ ldap_enum() {
     LDAP_PRIV_USERS_TMP="admin_users_${TARGET_IPV4}_${DATE_TAG}.txt"
     LDAP_PRIV_USERS_CSV="admin_users_${TARGET_IPV4}_${DATE_TAG}.csv"
     info "Enumerating Admin/Privileged Users via LDAP..."
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} --admin-count${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} --admin-count${RESET}"
         #mapfile -t LDAP_ADMIN_USERS < <(
         #    $LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --admin-count 2>/dev/null \
         #        | sed -nE '
@@ -2118,7 +2090,7 @@ ldap_enum() {
         #        | sort -u
         #)
         mapfile -t LDAP_ADMIN_USERS < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --admin-count 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --admin-count 2>/dev/null \
                 | awk '
                     $1 == "LDAP" &&
                     $5 != "" &&
@@ -2130,9 +2102,9 @@ ldap_enum() {
         )
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k --admin-count${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k --admin-count${RESET}"
         mapfile -t LDAP_ADMIN_USERS < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --admin-count 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --admin-count 2>/dev/null \
                 | awk '
                     $1 == "LDAP" &&
                     $5 != "" &&
@@ -2172,9 +2144,9 @@ ldap_enum() {
     info "Enumerating groups"
     
     # Parse groups with membercount
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} --groups${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} --groups${RESET}"
         #mapfile -t LDAP_GROUPS_RAW < <(
         #    $LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --groups 2>/dev/null \
         #        | sed -nE '
@@ -2188,7 +2160,7 @@ ldap_enum() {
         #        | sort -u
         #)
         mapfile -t LDAP_GROUPS_RAW < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --groups 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --groups 2>/dev/null \
                 | awk '
                     /^\s*LDAP/ && $6 ~ /^[1-9][0-9]*$/ {
                         # Reconstruct: GroupName|MemberCount|Description
@@ -2204,9 +2176,9 @@ ldap_enum() {
         )
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k --groups${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k --groups${RESET}"
         mapfile -t LDAP_GROUPS_RAW < <(
-            "$LDAP_TOOL" ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --groups 2>/dev/null \
+            netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --groups 2>/dev/null \
                 | awk '
                     /^\s*LDAP/ && $6 ~ /^[1-9][0-9]*$/ {
                         # Reconstruct: GroupName|MemberCount|Description
@@ -2251,9 +2223,9 @@ ldap_enum() {
     info "Enumerating computers"
     DATE_TAG=$(date +"%Y%m%d_%H%M%S")
     LDAP_COMPUTERS_CSV="computers_${TARGET}_${DATE_TAG}.csv"
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} --computers${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} --computers${RESET}"
         mapfile -t LDAP_COMPUTERS < <(
             $LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --computers 2>/dev/null \
                 | awk '{print $NF}' \
@@ -2262,7 +2234,7 @@ ldap_enum() {
         )
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k --computers${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k --computers${RESET}"
         mapfile -t LDAP_COMPUTERS < <(
             netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --computers 2>/dev/null \
                 | awk '{print $NF}' \
@@ -2291,9 +2263,9 @@ ldap_enum() {
     # 7. MachineAccountQuota
     ########################################
     info "Enumerating MachineAccountQuota"
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -M maq${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -M maq${RESET}"
         MAQ_VALUE=$(
             timeout 15 $LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -M maq 2>/dev/null \
                 | tr -d '\000' \
@@ -2302,7 +2274,7 @@ ldap_enum() {
         )
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k -M maq${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k -M maq${RESET}"
         MAQ_VALUE=$(
             timeout 15 netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k -M maq 2>/dev/null \
                 | tr -d '\000' \
@@ -2330,13 +2302,13 @@ ldap_enum() {
     info "Enumerating Kerberoastable accounts"
     DATE_TAG=$(date +"%Y%m%d_%H%M%S")
     KERBEROAST_OUT="kerberoast_${TARGET_IPV4}_${DATE_TAG}.txt"
-    if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+    if [[ "$NTLM_ENABLED" == true ]]; then
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} --kerberoasting $KERBEROAST_OUT${RESET}"
+        echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} --kerberoasting $KERBEROAST_OUT${RESET}"
         timeout 15 $LDAP_TOOL ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" --kerberoasting "$KERBEROAST_OUT" 2>/dev/null
     else
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k --kerberoasting $KERBEROAST_OUT${RESET}"
+        echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k --kerberoasting $KERBEROAST_OUT${RESET}"
         timeout 15 netexec ldap "$TARGET_IPV4" "${LDAP_EXEC_ARGS[@]}" -k --kerberoasting "$KERBEROAST_OUT" 2>/dev/null
     fi
 
@@ -2348,14 +2320,8 @@ ldap_enum() {
         
         # Run impacket-GetUserSPNs and parse SPNs into array
         echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-        if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-            echo -e "        ${GREEN}impacket-GetUserSPNs -hashes ':$MASKED_NTLM_HASH' -dc-ip $TARGET_IPV4 '${LDAP_DOMAIN}/${AUTH_USER}'${RESET}"
-            SPN_ENUM_OUTPUT=$(impacket-GetUserSPNs -hashes ":$AUTH_NTLM_HASH" -dc-ip "$TARGET_IPV4" \
-                "${LDAP_DOMAIN}/${AUTH_USER}" 2>/dev/null)
-        else
-            echo -e "        ${GREEN}impacket-GetUserSPNs '${LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}' -k -dc-ip $TARGET_IPV4 -dc-host $DOMAIN_CONTROLLER${RESET}"
-            SPN_ENUM_OUTPUT=$(impacket-GetUserSPNs "${LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" -k -dc-ip "$TARGET_IPV4" -dc-host "$DOMAIN_CONTROLLER" 2>/dev/null)
-        fi
+        echo -e "        ${GREEN}impacket-GetUserSPNs '${LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}' -k -dc-ip $TARGET_IPV4 -dc-host $DOMAIN_CONTROLLER${RESET}"
+        SPN_ENUM_OUTPUT=$(impacket-GetUserSPNs "${LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" -k -dc-ip "$TARGET_IPV4" -dc-host "$DOMAIN_CONTROLLER" 2>/dev/null)
 
         if parse_getuserspns_output "$SPN_ENUM_OUTPUT"; then
             print_section "Service Principal Names (via GetUserSPNs):" "${SPN_LIST[@]}"
@@ -2412,9 +2378,9 @@ ldap_enum() {
         #    )
         #fi
         
-        if [[ "$NTLM_ENABLED" == true || -n "${AUTH_NTLM_HASH:-}" ]]; then
+        if [[ "$NTLM_ENABLED" == true ]]; then
             echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-            echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -M daclread -o 'TARGET_DN=CN=Computers,$LDAP_BASE_DN' ACTION=read${RESET}"
+            echo -e "        ${GREEN}$LDAP_TOOL ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -M daclread -o 'TARGET_DN=CN=Computers,$LDAP_BASE_DN' ACTION=read${RESET}"
 
             set +e
             DACL_OUT=$(
@@ -2429,7 +2395,7 @@ ldap_enum() {
             set -e
         else
             echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-            echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_DISPLAY_ARGS[*]} -k -M daclread -o 'TARGET_DN=CN=Computers,$LDAP_BASE_DN' ACTION=read${RESET}"
+            echo -e "        ${GREEN}netexec ldap $TARGET_IPV4 ${LDAP_EXEC_ARGS[*]} -k -M daclread -o 'TARGET_DN=CN=Computers,$LDAP_BASE_DN' ACTION=read${RESET}"
 
             set +e
             DACL_OUT=$(
@@ -2662,7 +2628,7 @@ check_badsuccessor() {
     dc_target="$(get_preferred_dc_host "$dc_target")"
   fi
 
-  if [[ -z "${AUTH_USER:-}" ]] || [[ -z "${AUTH_PASS:-}" && -z "${AUTH_NTLM_HASH:-}" ]]; then
+  if [[ -z "${AUTH_USER:-}" || -z "${AUTH_PASS:-}" ]]; then
     warn "BadSuccessor assessment requires authenticated LDAP credentials"
     return 1
   fi
@@ -2686,19 +2652,25 @@ check_badsuccessor() {
   # Gather Domain Controller/AD Version
   ldap_filter='(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))'
   ldap_attributes='dNSHostName operatingSystem operatingSystemVersion'
-  cmd=("$tool" ldap "$dc_target" -d "$domain" -u "$AUTH_USER")
-  display_cmd=("$tool" ldap "$dc_target" -d "$domain" -u "$AUTH_USER")
-  if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-    cmd+=(-H "$AUTH_NTLM_HASH")
-    display_cmd+=(-H "$MASKED_NTLM_HASH")
-  else
-    cmd+=(-p "$AUTH_PASS")
-    display_cmd+=(-p "$MASKED_AUTH_PASS")
-  fi
-  cmd+=(--query "$ldap_filter" "$ldap_attributes")
-  display_cmd+=(--query "$ldap_filter" "$ldap_attributes")
+  cmd=(
+    "$tool" ldap "$dc_target"
+    -d "$domain"
+    -u "$AUTH_USER"
+    -p "$AUTH_PASS"
+    --query "$ldap_filter"
+    "$ldap_attributes"
+  )
 
-  if [[ "${NTLM_ENABLED:-true}" != true && -z "${AUTH_NTLM_HASH:-}" ]]; then
+  display_cmd=(
+    "$tool" ldap "$dc_target"
+    -d "$domain"
+    -u "$AUTH_USER"
+    -p "$MASKED_AUTH_PASS"
+    --query "$ldap_filter"
+    "$ldap_attributes"
+  )
+
+  if [[ "${NTLM_ENABLED:-true}" != true ]]; then
     cmd+=( -k )
     display_cmd+=( -k )
   fi
@@ -2822,19 +2794,23 @@ check_badsuccessor() {
   safe_target="$(sanitize_name "${TARGET_IPV4:-$TARGET}")"
   BADSUCCESSOR_EVIDENCE="$evidence_dir/badsuccessor_${safe_target}_$(date +%Y%m%d_%H%M%S).txt"
 
-  cmd=("$tool" ldap "$dc_target" -u "$AUTH_USER" -d "$domain")
-  display_cmd=("$tool" ldap "$dc_target" -u "$AUTH_USER" -d "$domain")
-  if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-    cmd+=(-H "$AUTH_NTLM_HASH")
-    display_cmd+=(-H "$MASKED_NTLM_HASH")
-  else
-    cmd+=(-p "$AUTH_PASS")
-    display_cmd+=(-p "$MASKED_AUTH_PASS")
-  fi
-  cmd+=(-M badsuccessor)
-  display_cmd+=(-M badsuccessor)
+  cmd=(
+    "$tool" ldap "$dc_target"
+    -u "$AUTH_USER"
+    -p "$AUTH_PASS"
+    -d "$domain"
+    -M badsuccessor
+  )
 
-  if [[ "${NTLM_ENABLED:-true}" != true && -z "${AUTH_NTLM_HASH:-}" ]]; then
+  display_cmd=(
+    "$tool" ldap "$dc_target"
+    -u "$AUTH_USER"
+    -p "$MASKED_AUTH_PASS"
+    -d "$domain"
+    -M badsuccessor
+  )
+
+  if [[ "${NTLM_ENABLED:-true}" != true ]]; then
     cmd+=( -k )
     display_cmd+=( -k )
   fi
@@ -3837,11 +3813,8 @@ check_wmi_access() {
     local DOMAIN=$2
     local USER=$3
     local PASS=$4
-    local NTLM_HASH="${5:-}"
     local l_error=false
     local WMI_TOOL="" wmi_target display_command
-    local -a wmi_args=()
-    local -a wmi_display_args=()
     
     info "Testing WMI access on $TARGET_IP with user '$USER'"
     
@@ -3854,22 +3827,14 @@ check_wmi_access() {
         return
     fi
 
-    if [[ -n "$NTLM_HASH" ]]; then
-        wmi_target="$DOMAIN/$USER@$TARGET_IP"
-        wmi_args=(-hashes ":$NTLM_HASH" "$wmi_target" whoami)
-        wmi_display_args=(-hashes ":${MASKED_NTLM_HASH:-[REDACTED]}" "$wmi_target" whoami)
-    else
-        wmi_target="$DOMAIN/$USER:$PASS@$TARGET_IP"
-        wmi_args=("$wmi_target" whoami)
-        wmi_display_args=("$DOMAIN/$USER:$(sps_secret_value "$PASS")@$TARGET_IP" whoami)
-    fi
-    display_command="$(sps_shell_join "$WMI_TOOL" "${wmi_display_args[@]}")"
+    wmi_target="$DOMAIN/$USER:$PASS@$TARGET_IP"
+    display_command="$(sps_shell_join "$WMI_TOOL" "$DOMAIN/$USER:$(sps_secret_value "$PASS")@$TARGET_IP" whoami)"
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
     echo -e "        ${GREEN}${display_command}${RESET}"
-    record_command_argv "WMI" "Authenticated access validation" "$WMI_TOOL" "${wmi_args[@]}"
+    record_command_argv "WMI" "Password-authenticated access validation" "$WMI_TOOL" "$wmi_target" whoami
 
     # Run with timeout to prevent hangs
-    if WMI_OUTPUT=$(timeout 12 "$WMI_TOOL" "${wmi_args[@]}" 2>&1); then
+    if WMI_OUTPUT=$(timeout 12 "$WMI_TOOL" "$wmi_target" whoami 2>&1); then
         RC=0
     else
         RC=$?
@@ -3922,10 +3887,7 @@ check_psexec_access() {
     local DOMAIN=$2
     local USER=$3
     local PASS=$4
-    local NTLM_HASH="${5:-}"
     local psexec_target display_command
-    local -a psexec_args=()
-    local -a psexec_display_args=()
 
     info "Testing PsExec access on $TARGET_IP with user '$USER'"
 
@@ -3933,22 +3895,14 @@ check_psexec_access() {
         warn "impacket-psexec not found — skipping PsExec check"
         return
     fi
-    if [[ -n "$NTLM_HASH" ]]; then
-        psexec_target="$DOMAIN/$USER@$TARGET_IP"
-        psexec_args=(-hashes ":$NTLM_HASH" "$psexec_target" whoami)
-        psexec_display_args=(-hashes ":${MASKED_NTLM_HASH:-[REDACTED]}" "$psexec_target" whoami)
-    else
-        psexec_target="$DOMAIN/$USER:$PASS@$TARGET_IP"
-        psexec_args=("$psexec_target" whoami)
-        psexec_display_args=("$DOMAIN/$USER:$(sps_secret_value "$PASS")@$TARGET_IP" whoami)
-    fi
-    display_command="$(sps_shell_join impacket-psexec "${psexec_display_args[@]}")"
+    psexec_target="$DOMAIN/$USER:$PASS@$TARGET_IP"
+    display_command="$(sps_shell_join impacket-psexec "$DOMAIN/$USER:$(sps_secret_value "$PASS")@$TARGET_IP" whoami)"
     echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
     echo -e "        ${GREEN}${display_command}${RESET}"
-    record_command_argv "PsExec" "Remote service execution validation" impacket-psexec "${psexec_args[@]}"
+    record_command_argv "PsExec" "Remote service execution validation" impacket-psexec "$psexec_target" whoami
     
     # Run with timeout to avoid hangs
-    if PSEXEC_OUTPUT=$(timeout 12 impacket-psexec "${psexec_args[@]}" 2>&1); then
+    if PSEXEC_OUTPUT=$(timeout 12 impacket-psexec "$psexec_target" whoami 2>&1); then
         RC=0
     else
         RC=$?
@@ -4235,7 +4189,6 @@ get_domain_sid() {
     local password="${2:-}"
     local target_domain_controller="${3:-}"
     local ntlm_on="${4:-${NTLM_ENABLED:-false}}"
-    local ntlm_hash="${5:-}"
     local lookup_user="${domain_user##*/}"
     local sid_output=""
     local rpc_output=""
@@ -4297,11 +4250,7 @@ get_domain_sid() {
     # Keep impacket-lookupsid as the primary method. Unlike the old code, a
     # missing command or failed lookup now falls through to rpcclient.
     if command -v impacket-lookupsid >/dev/null 2>&1; then
-        if [[ -n "$ntlm_hash" ]]; then
-            echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
-            echo -e "        ${GREEN}impacket-lookupsid -hashes ':${MASKED_NTLM_HASH:-[REDACTED]}' ${domain_user}@${target_domain_controller}${RESET}"
-            sid_output=$(impacket-lookupsid -hashes ":$ntlm_hash" "$domain_user@$target_domain_controller" 2>&1 || true)
-        elif [[ "$ntlm_on" == true ]]; then
+        if [[ "$ntlm_on" == true ]]; then
             echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
                 echo -e "        ${GREEN}impacket-lookupsid ${domain_user}:$(sps_secret_value "$password")@${target_domain_controller}${RESET}"
             sid_output=$(impacket-lookupsid "$domain_user:$password@$target_domain_controller" 2>&1 || true)
@@ -4344,9 +4293,7 @@ get_domain_sid() {
                 note "Kerberos was detected, but rpcclient cannot use it without a valid ccache"
             fi
 
-            if [[ -z "$l_domain_sid" && -n "$ntlm_hash" ]]; then
-                note "Skipping rpcclient password fallback because hash credentials were supplied"
-            elif [[ -z "$l_domain_sid" && "$ntlm_on" == true ]]; then
+            if [[ -z "$l_domain_sid" && "$ntlm_on" == true ]]; then
                 info "Trying rpcclient Domain SID lookup with password/NTLM authentication"
                 echo -e "     ${YELLOW}$ICON_TIP Copy/Paste:${RESET}"
                 echo -e "        ${GREEN}printf 'lookupnames %s\\nexit\\n' '$lookup_user' | rpcclient '$target_domain_controller' -U '${domain_user}%$(sps_secret_value "$password")'${RESET}"
@@ -4800,14 +4747,18 @@ PORTS=(
     "389:LDAP:interesting"
     "443:HTTPS:open"
     "445:SMB:high"
+    "465:SMTPS:interesting"
     "515:PRINTER:open"
+    "587:SMTP Submission:interesting"
     "631:PRINTER:open"
     "636:LDAPS:interesting"
     "993:IMAPS:interesting"
+    "995:POP3S:interesting"
     "1433:SQL Server:high"
     "2049:Network File System:high"
     "2375:Docker API:high"
     "2377:Docker Swarm:interesting"
+    "2525:SMTP-Alt:interesting"
     "3000:Web Dev:interesting"
     "3306:MySQL:interesting"
     "3389:RDP:high"
@@ -4824,6 +4775,7 @@ PORTS=(
     "54925:BROTHER_PRINTER:open"
 )
 sps_configure_ports || exit $?
+sps_configure_udp_ports || exit $?
 
 # --------- Port-derived validation ideas (never CVE findings) ----------
 declare -A ATTACK_SURFACE_HINTS=(
@@ -4831,13 +4783,19 @@ declare -A ATTACK_SURFACE_HINTS=(
   [22]="Validate SSH authentication policy, algorithms, and the identified server version"
   [23]="Cleartext auth, legacy devices, credential reuse"
   [25]="Validate SMTP relay policy, user disclosure, and the identified mail-server version"
+  [465]="Review implicit-TLS SMTP capabilities, authentication exposure, and certificate identity"
+  [587]="Review SMTP submission STARTTLS enforcement and advertised authentication mechanisms"
+  [2525]="Review alternate SMTP capabilities, authentication exposure, and relay policy"
   [53]="Zone transfer (AXFR), DNS recursion"
   [80]="Web vulns: file upload, auth bypass, outdated CMS"
   [88]="Kerberos roasting, AD misconfig, pre-auth disabled"
   [111]="RPC program discovery, NFS/mountd enumeration, and dynamic RPC services"
-  [110]="Cleartext POP3, weak creds"
+  [110]="Review POP3 STLS support and advertised authentication mechanisms"
+  [995]="Review implicit-TLS POP3 capabilities, authentication exposure, and certificate identity"
   [139]="Validate SMB dialects, null sessions, signing, and patch posture"
   [389]="Anonymous LDAP bind, domain info disclosure"
+  [143]="Review IMAP STARTTLS support and advertised authentication mechanisms"
+  [993]="Review implicit-TLS IMAP capabilities, authentication exposure, and certificate identity"
   [443]="TLS misconfig, weak ciphers, web vulns"
   [445]="Validate SMB signing, relay resistance, dialects, and patch posture"
   [631]="CUPS info leak, printer RCE class issues"
@@ -4866,18 +4824,6 @@ print_attack_surface_hint() {
 MSSQL_RIDBRUTE_OK=false
 MSSQL_RIDBRUTE_LCLAUTH_OK=false
 
-sps_build_mssql_auth_args() {
-    local result_name="$1"
-    local -n result_ref="$result_name"
-
-    result_ref=(mssql "$TARGET_IPV4" -u "$AUTH_USER")
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        result_ref+=(-H "$AUTH_NTLM_HASH" -d "${AUTH_DOMAIN:-$LDAP_DOMAIN}")
-    else
-        result_ref+=(-p "$AUTH_PASS")
-    fi
-}
-
 run_mssql_priv_detection() {
     local auth_mode="$1"
     local auth_label
@@ -4887,8 +4833,12 @@ run_mssql_priv_detection() {
     local rollback_command="netexec"
     local quoted arg
 
-    local -a base_args=()
-    sps_build_mssql_auth_args base_args
+    local -a base_args=(
+        mssql
+        "$TARGET_IPV4"
+        -u "$AUTH_USER"
+        -p "$AUTH_PASS"
+    )
 
     case "$auth_mode" in
         default)
@@ -5056,8 +5006,12 @@ run_mssql_rid_brute() {
     local display_command="netexec"
     local arg quoted
 
-    local -a nxc_args=()
-    sps_build_mssql_auth_args nxc_args
+    local -a nxc_args=(
+        mssql
+        "$TARGET_IPV4"
+        -u "$AUTH_USER"
+        -p "$AUTH_PASS"
+    )
 
     local -a users=()
     local -A seen_users=()
@@ -5258,8 +5212,12 @@ run_mssql_cmdshell_check() {
     local cmdshell_command="netexec"
     local quoted arg
 
-    local -a cmdshell_args=()
-    sps_build_mssql_auth_args cmdshell_args
+    local -a cmdshell_args=(
+        mssql
+        "$TARGET_IPV4"
+        -u "$AUTH_USER"
+        -p "$AUTH_PASS"
+    )
 
     case "$auth_mode" in
         default)
@@ -5407,7 +5365,9 @@ run_mssql_cmdshell_check() {
 }
 
 # --------- After port scanning completes ----------
-OPEN_PORTS=()   # Will store open ports
+OPEN_PORTS=()   # Will store open TCP ports
+UDP_OPEN_PORTS=()
+UDP_POSSIBLE_PORTS=()
 
 sps_refresh_service_states() {
     [[ "${LDAP_FOUND:-false}" == true || "${LDAP_ENUM_DONE:-false}" == true ]] && LDAP_SERVICE_CONFIRMED=true
@@ -5442,15 +5402,6 @@ if [ -n "$AUTH_USER" ] && [ -n "$AUTH_PASS" ]; then
     fi
     echo
 fi
-if [[ -n "$AUTH_USER" && -n "$AUTH_NTLM_HASH" ]]; then
-    NTLM_HASH_PROVIDED=true
-    success "NTLM hash provided for supported pass-the-hash checks"
-    echo -e "   - User:      ${YELLOW}$AUTH_USER${RESET}"
-    echo -e "   - NT hash:   ${YELLOW}${MASKED_NTLM_HASH}${RESET}"
-    echo -e "   - Domain:    ${YELLOW}$AUTH_DOMAIN${RESET}"
-    note "Password- and Kerberos-only authenticated checks will be skipped"
-    echo
-fi
 
 resolve_hostname_to_ip "$TARGET"
 if [[ "$DRY_RUN" == true ]]; then
@@ -5470,8 +5421,7 @@ record_command "Invocation" "Repeat this script run" "$INVOCATION"
 # --------- Function to Scan a Single Port ----------
 # ---------- PORT SCAN LOOP ----------
 run_port_scan "$TARGET_IPV4" "${PORTS[@]}" || exit 5
-
-sps_refresh_service_states
+run_udp_scan "$TARGET_IPV4" "${UDP_PORTS[@]}" || true
 
 # --------- Reconstruct OPEN_PORTS safely ----------
 OPEN_PORTS=()
@@ -5480,9 +5430,33 @@ if [ -s "$OPEN_PORTS_FILE" ]; then
 fi
 printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "3389" && RDP_PORT_OPEN=true
 
+if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
+    info "Open TCP ports: ${OPEN_PORTS[*]}"
+else
+    warn "No open TCP ports detected"
+fi
+if [ "${#UDP_OPEN_PORTS[@]}" -gt 0 ]; then
+    info "Confirmed open UDP ports: ${UDP_OPEN_PORTS[*]}"
+fi
+if [ "${#UDP_POSSIBLE_PORTS[@]}" -gt 0 ]; then
+    info "Inconclusive UDP open|filtered candidates: ${UDP_POSSIBLE_PORTS[*]}"
+fi
+
+sps_section "Service Exposure Checks"
+
+# --------- Protocol-aware service discovery ----------
+sps_run_service_probes "${OPEN_PORTS[@]}"
+sps_run_smtp_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_pop3_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_imap_discovery "$TARGET_IPV4" "${OPEN_PORTS[@]}"
+sps_run_snmp_discovery "$TARGET_IPV4"
+
+sps_refresh_service_states
+
 # --------- Optional Service / Version / OS Detection ----------
 if [ "$ENABLE_SERVICE_DETECT" = true ]; then
     service_version_detection "$TARGET_IPV4" || true
+    sps_udp_service_version_detection "$TARGET_IPV4" || true
 fi
 
 # --------- NetBIOS Name Service Detection (UDP/137) ----------
@@ -5534,21 +5508,11 @@ if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
     record_command "Discovery" "Full TCP port sweep" "$nmap_sweep_command"
     
     echo
-    info "Open ports detected: ${OPEN_PORTS[*]}"
-    echo
     info "Port-derived validation ideas (not vulnerability or CVE findings):"
     for port in "${OPEN_PORTS[@]}"; do
         print_attack_surface_hint "$port"
     done
-else
-    warn "No open ports detected"
 fi
-
-echo -e "\n${BLUE}========================================${RESET}"
-
-echo -e "\n${BLUE}========================================${RESET}"
-echo -e "${BYELLOW}  Post-Scan Service Exposure Checks ${RESET}"
-echo -e "${BLUE}========================================${RESET}"
 
 if [ "${#OPEN_PORTS[@]}" -gt 0 ]; then
     for port in "${OPEN_PORTS[@]}"; do
@@ -5891,11 +5855,11 @@ if [ -s "$SMB_MARKER" ]; then
             smb_command+=(-u guest -p '' --shares)
             smb_display+=(-u guest -p '' --shares)
         elif [[ "$SMB_LABEL" == "AUTHENTICATED" ]]; then
-            sps_build_netexec_smb_auth_args auth_args "$SMB_USER" "$SMB_PASS" "$domain" "${AUTH_NTLM_HASH:-}"
-            sps_build_netexec_smb_auth_args display_auth_args "$SMB_USER" "$(sps_secret_value "$SMB_PASS")" "$domain" "${MASKED_NTLM_HASH:-}"
+            sps_build_netexec_smb_auth_args auth_args "$SMB_USER" "$SMB_PASS" "$domain"
+            sps_build_netexec_smb_auth_args display_auth_args "$SMB_USER" "$(sps_secret_value "$SMB_PASS")" "$domain"
             smb_command+=("${auth_args[@]}")
             smb_display+=("${display_auth_args[@]}")
-            if [[ "$NTLM_ENABLED" != true && -z "${AUTH_NTLM_HASH:-}" ]]; then
+            if [[ "$NTLM_ENABLED" != true ]]; then
                 smb_command+=(-k)
                 smb_display+=(-k)
             fi
@@ -5919,7 +5883,6 @@ if [ -s "$SMB_MARKER" ]; then
         # Did authentication succeed?
         if echo "$OUT" | grep -qP '\[\+\] .*\\.*:'; then
             success "SMB authentication successful"
-            SMB_AUTH_OK=true
             SMB_SERVICE_CONFIRMED=true
             SMB_ACCESS_CONFIRMED=true
         fi
@@ -5936,17 +5899,13 @@ if [ -s "$SMB_MARKER" ]; then
             if echo "$OUT" | grep -qP 'Share'; then
                 echo "$OUT" | tail -n +4
                 echo
-                if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-                    notify "   NTLM pass-the-hash authentication was used"
-                elif [[ "$NTLM_ENABLED" != true ]]; then
-                    notify "   Kerberos was used!"
-                    echo -e "     Use 'impacket-smbclient' to view files."
-                    smbclient_target="${AUTH_DOMAIN:-$LDAP_DOMAIN}/${SMB_USER}@${DOMAIN_CONTROLLER:-${TARGET_FQDN:-$TARGET_IPV4}}"
-                    smbclient_command="$(sps_shell_join impacket-smbclient -k -no-pass "$smbclient_target")"
-                    echo -e "         ${GREEN}${smbclient_command}${RESET}"
-                    record_command_argv "SMB" "Authenticated Kerberos client" impacket-smbclient -k -no-pass "$smbclient_target"
-                    echo
-                fi
+                notify "   Kerberos was used!"
+                echo -e "     Use 'impacket-smbclient' to view files."
+                smbclient_target="${AUTH_DOMAIN:-$LDAP_DOMAIN}/${SMB_USER}@${DOMAIN_CONTROLLER:-${TARGET_FQDN:-$TARGET_IPV4}}"
+                smbclient_command="$(sps_shell_join impacket-smbclient -k -no-pass "$smbclient_target")"
+                echo -e "         ${GREEN}${smbclient_command}${RESET}"
+                record_command_argv "SMB" "Authenticated Kerberos client" impacket-smbclient -k -no-pass "$smbclient_target"
+                echo
             else
                 warn "Authenticated but no shares are visible to this user"
             fi
@@ -6045,21 +6004,7 @@ if [ -s "$SMB_MARKER" ]; then
     fi 
     
     # 3) Check for authenticated access.
-    if $NTLM_HASH_PROVIDED; then
-        echo
-        info "Attempting SMB authentication with the supplied NTLM hash"
-        if command -v netexec >/dev/null 2>&1; then
-            smb_enum_netexec "$AUTH_USER" "" "AUTHENTICATED" || {
-                if [[ "$SMB_AUTH_OK" == true ]]; then
-                    notify "Authenticated but no shares are visible to this user"
-                else
-                    warn "SMB NTLM-hash authentication failed"
-                fi
-            }
-        else
-            warn "SMB NTLM-hash authentication skipped: netexec is unavailable"
-        fi
-    elif $CREDS_PROVIDED; then
+    if $CREDS_PROVIDED; then
         echo
         info "Attempting SMB authentication with provided credentials"
 
@@ -6100,13 +6045,7 @@ if [ -s "$SMB_MARKER" ]; then
         if $SMB_GUEST_OK && command -v crackmapexec >/dev/null 2>&1; then
             cme_enum_users "GUEST" "-u guest -p ''" || true
         fi
-        if $NTLM_HASH_PROVIDED; then
-            if command -v netexec >/dev/null 2>&1; then
-                NXC_AUTH_ARGS=()
-                sps_build_netexec_smb_auth_args NXC_AUTH_ARGS "$AUTH_USER" "" "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}" "$AUTH_NTLM_HASH"
-                nxc_enum_users "AUTHENTICATED" "${NXC_AUTH_ARGS[@]}" || true
-            fi
-        elif $CREDS_PROVIDED; then
+        if $CREDS_PROVIDED; then
             if [[ -n "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}" ]] && command -v netexec >/dev/null 2>&1; then
                 NXC_AUTH_ARGS=()
                 sps_build_netexec_smb_auth_args NXC_AUTH_ARGS "$AUTH_USER" "$AUTH_PASS" "${AUTH_DOMAIN:-${LDAP_DOMAIN:-}}"
@@ -6176,7 +6115,7 @@ if [ -s "$SMB_MARKER" ]; then
 
     # -------- No Shares Found --------
     if ! $SMB_ENUM_SUCCESS; then
-        if $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; then
+        if $CREDS_PROVIDED; then
             info "No SMB Shares Detected. Maybe retry with different user creds?"
         else
             info "No SMB Shares Detected. Maybe retry with user creds?"
@@ -6184,9 +6123,8 @@ if [ -s "$SMB_MARKER" ]; then
     fi
 fi
 
-# Verify password credentials can access the domain controller. Hash credentials
-# are validated by ldap_enum so its downstream command arguments use -H too.
-if $CREDS_PROVIDED && [ "$HAS_LDAP" -eq 1 ]; then
+# Verify Creds can Access Domain Controller
+if  $CREDS_PROVIDED && [ $HAS_LDAP -eq 1 ]  ; then
     if dc_auth_check "$AUTH_USER" "$AUTH_PASS" "${AUTH_DOMAIN:-$LDAP_DOMAIN}" "$TARGET_IPV4"; then
         echo
         success "${GREEN}Credentials successfully authenticated to Domain Controller!${RESET}"
@@ -6196,14 +6134,6 @@ if $CREDS_PROVIDED && [ "$HAS_LDAP" -eq 1 ]; then
         echo
         warn "${RED}Credentials failed to authenticate to Domain Controller.${RESET}"
         echo
-    fi
-fi
-
-if [[ "$ENABLE_SECRETSDUMP" == true ]]; then
-    if [[ "$HAS_SMB" -eq 1 ]]; then
-        sps_run_secretsdump_hash_check
-    else
-        warn "Secretsdump check skipped: SMB is not available on the target"
     fi
 fi
 
@@ -6221,9 +6151,7 @@ if [ -s "$LDAP_MARKER" ] && ! $LDAP_ENUM_DONE; then
 
     #echo "LDAP_ENUM With Creds"
     echo
-    if $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; then
-        ldap_enum auth "${AUTH_DOMAIN:-$LDAP_DOMAIN}"
-    fi
+    $CREDS_PROVIDED && ldap_enum auth "${AUTH_DOMAIN:-$LDAP_DOMAIN}"
     echo
     if $LDAP_AUTH_BIND; then
         high_risk "LDAP Exposure Level: Directory is Accessible with known/compromised credentials"
@@ -6235,7 +6163,7 @@ if [ -s "$LDAP_MARKER" ] && ! $LDAP_ENUM_DONE; then
         high_risk "LDAP Exposure Level: Anonymous Directory Access"
     fi
 fi
-if { $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; } && (( HAS_LDAP == 1 )); then
+if $CREDS_PROVIDED && (( HAS_LDAP == 1 )); then
     # Gather authoritative account-to-SPN mappings through an LDAP query.
     # Auto mode follows the existing NTLM capability result and uses Kerberos
     # when password/NTLM LDAP authentication is unavailable.
@@ -6254,8 +6182,8 @@ if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "135" && \
     echo
     info "WMI likely supported — ports 135 and 445 are open"
 
-    if [[ -n "$AUTH_USER" ]] && [[ -n "$AUTH_PASS" || -n "$AUTH_NTLM_HASH" ]]; then
-        check_wmi_access "$TARGET_IPV4" "${AUTH_DOMAIN:-$LDAP_DOMAIN}" "$AUTH_USER" "$AUTH_PASS" "$AUTH_NTLM_HASH"
+    if [[ -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
+        check_wmi_access "$TARGET_IPV4" "${AUTH_DOMAIN:-$LDAP_DOMAIN}" "$AUTH_USER" "$AUTH_PASS"
     else
         note "No credentials provided — skipping authenticated WMI check"
     fi
@@ -6265,8 +6193,8 @@ if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx "445"; then
     echo
     info "Service Control Manager Detected! - Port 445 open — testing PsExec access"
 
-    if [[ -n "$AUTH_USER" ]] && [[ -n "$AUTH_PASS" || -n "$AUTH_NTLM_HASH" ]]; then
-        check_psexec_access "$TARGET_IPV4" "${AUTH_DOMAIN:-$LDAP_DOMAIN}" "$AUTH_USER" "$AUTH_PASS" "$AUTH_NTLM_HASH"
+    if [[ -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
+        check_psexec_access "$TARGET_IPV4" "${AUTH_DOMAIN:-$LDAP_DOMAIN}" "$AUTH_USER" "$AUTH_PASS"
     else
         note "No credentials provided — skipping authenticated PsExec check"
     fi
@@ -6387,27 +6315,7 @@ fi
 #############################################
 # Check to see what Credentials can access
 #############################################
-if $NTLM_HASH_PROVIDED; then
-    if [[ "$RDP_PORT_OPEN" == true ]]; then
-        sps_run_netexec_hash_check rdp "$TARGET_IPV4"
-    fi
-else
-    sps_run_rdp_auth_check "$TARGET_IPV4"
-fi
-
-if $NTLM_HASH_PROVIDED; then
-    if printf '%s\n' "${OPEN_PORTS[@]}" | grep -Eq '^(5985|5986)$'; then
-        sps_run_netexec_hash_check winrm "$TARGET_IPV4"
-    fi
-    if printf '%s\n' "${OPEN_PORTS[@]}" | grep -qx '1433'; then
-        sps_run_netexec_hash_check mssql "$TARGET_IPV4"
-        if [[ "${MSSQL_AUTH_OK:-false}" == true ]]; then
-            run_mssql_rid_brute default
-            [[ "$ENABLE_MSSQL_PRIVESC" == true ]] && run_mssql_priv_detection default
-            [[ "$ENABLE_MSSQL_CMDSHELL" == true ]] && run_mssql_cmdshell_check default
-        fi
-    fi
-fi
+sps_run_rdp_auth_check "$TARGET_IPV4"
 
 if $CREDS_PROVIDED; then
     #echo "[DEBUG] Creds were provided"
@@ -6597,22 +6505,8 @@ check_winrm_privs() {
 
     info "Running whoami /priv via NetExec WinRM..."
 
-    local -a winrm_auth_args=(-u "$AUTH_USER" -d "${AUTH_DOMAIN:-$LDAP_DOMAIN}")
-    local -a winrm_display_args=(-u "$AUTH_USER" -d "${AUTH_DOMAIN:-$LDAP_DOMAIN}")
-
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        winrm_auth_args+=(-H "$AUTH_NTLM_HASH")
-        winrm_display_args+=(-H "$MASKED_NTLM_HASH")
-    elif [[ -n "${AUTH_PASS:-}" ]]; then
-        winrm_auth_args+=(-p "$AUTH_PASS")
-        winrm_display_args+=(-p "$MASKED_AUTH_PASS")
-    else
-        note "No supported credentials provided — skipping WinRM privilege check"
-        return
-    fi
-
-    echo -e "        ${GREEN}$(sps_shell_join netexec winrm "$TARGET_IPV4" "${winrm_display_args[@]}" -X 'whoami /priv')${RESET}"
-    PRIV_OUTPUT=$(timeout 15s netexec winrm "$TARGET_IPV4" "${winrm_auth_args[@]}" -X 'whoami /priv' 2>/dev/null)
+    # Run command via NetExec and capture output
+    PRIV_OUTPUT=$(timeout 15s netexec winrm "$TARGET_IPV4" -u "$AUTH_USER" -p "$AUTH_PASS" -d "${AUTH_DOMAIN:-$LDAP_DOMAIN}" -X 'whoami /priv' 2>/dev/null)
 
     # Check if we got any output
     if [[ -z "$PRIV_OUTPUT" ]]; then
@@ -6663,9 +6557,8 @@ if [ "$WINRM_DETECTED" = true ]; then
 fi
 
 # Check for & get Domain SID
-if (( HAS_SMB == 1 )) && [[ "$SMB_AUTH_OK" == true && -n "$DOMAIN_CONTROLLER" ]] &&
-   { $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; }; then
-    get_domain_sid "${AUTH_DOMAIN:-$LDAP_DOMAIN}/$AUTH_USER" "$AUTH_PASS" "$DOMAIN_CONTROLLER" "$NTLM_ENABLED" "$AUTH_NTLM_HASH" || true
+if (( HAS_SMB == 1 )) && [[ "$CREDS_PROVIDED" == true && "$SMB_AUTH_OK" == true && -n "$DOMAIN_CONTROLLER" ]]; then
+    get_domain_sid "${AUTH_DOMAIN:-$LDAP_DOMAIN}/$AUTH_USER" "$AUTH_PASS" "$DOMAIN_CONTROLLER" "$NTLM_ENABLED" || true
 fi
 
 ###########################################
@@ -6915,8 +6808,6 @@ if [[ "$HAS_LDAP" -eq 1 && "$HAS_KERB" -eq 1 && "$ENABLE_ADCS" == true && "$CRED
         warn "AD CS check skipped — certipy-ad not installed"
         lightbulb "Install with: pipx install certipy-ad"
     fi
-elif [[ "$HAS_LDAP" -eq 1 && "$HAS_KERB" -eq 1 && "$ENABLE_ADCS" == true && "$NTLM_HASH_PROVIDED" == true ]]; then
-    warn "AD CS check skipped — this Certipy path is password/Kerberos-only"
 elif [[ "$HAS_LDAP" -eq 1 && "$HAS_KERB" -eq 1 && "$ENABLE_ADCS" == false ]]; then
     echo
     alert "${BLUE}Tip:${RESET} AD Certificate Services Detected"
@@ -6934,8 +6825,7 @@ fi
 ########################################
 # Perform Attack: Kerberoast
 ########################################
-if [[ "$ENABLE_KERBROAST" == true && "$HAS_KERB" -eq 1 ]] &&
-   { $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; }; then
+if [[ "$ENABLE_KERBROAST" == true && "$CREDS_PROVIDED" == true && "$HAS_KERB" -eq 1 ]]; then
 
     echo
 
@@ -6944,29 +6834,16 @@ if [[ "$ENABLE_KERBROAST" == true && "$HAS_KERB" -eq 1 ]] &&
     alert "Kerberoast Candidates Identified"
     info  "Attempting Kerberoast via Impacket"
     lightbulb "Manual fallback:"
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        echo -e "  ${GREEN}impacket-GetUserSPNs -hashes ':$MASKED_NTLM_HASH' '${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}' -dc-ip $TARGET_IPV4 -request${RESET}"
-    else
-        echo -e "  ${GREEN}impacket-GetUserSPNs '${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}' -dc-ip $TARGET_IPV4 -request${RESET}"
-    fi
+    echo -e "  ${GREEN}impacket-GetUserSPNs '${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}:${MASKED_AUTH_PASS}' -dc-ip $TARGET_IPV4 -request${RESET}"
     echo
 
     # Run Kerberoast safely and capture output
     KERB_EXIT=0
-    if [[ -n "${AUTH_NTLM_HASH:-}" ]]; then
-        KERB_OUTPUT=$(impacket-GetUserSPNs \
-            -hashes ":$AUTH_NTLM_HASH" \
-            "${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}" \
-            -dc-ip "$TARGET_IPV4" \
-            -request \
-            -outputfile "$KERBEROAST_FILE" 2>&1) || KERB_EXIT=$?
-    else
-        KERB_OUTPUT=$(impacket-GetUserSPNs \
-            "${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" \
-            -dc-ip "$TARGET_IPV4" \
-            -request \
-            -outputfile "$KERBEROAST_FILE" 2>&1) || KERB_EXIT=$?
-    fi
+    KERB_OUTPUT=$(impacket-GetUserSPNs \
+        "${AUTH_DOMAIN:-$LDAP_DOMAIN}/${AUTH_USER}:${AUTH_PASS}" \
+        -dc-ip "$TARGET_IPV4" \
+        -request \
+        -outputfile "$KERBEROAST_FILE" 2>&1) || KERB_EXIT=$?
 
     # Always show Impacket output
     echo "$KERB_OUTPUT"
@@ -7008,7 +6885,7 @@ if [[ "$ENABLE_KERBROAST" == true && "$HAS_KERB" -eq 1 ]] &&
         warn "Kerberoast completed but no hashes were returned"
         echo -e  "    SPNs may exist but account may be protected or not Kerberoastable"
     fi
-elif [[ "$ENABLE_KERBROAST" == true ]] && { $CREDS_PROVIDED || $NTLM_HASH_PROVIDED; }; then
+elif [[ "$ENABLE_KERBROAST" == true && "$CREDS_PROVIDED" == true ]]; then
     echo
     info "${RED}Kerberoast skipped${RESET} (Kerberos port 88 not accessible)"
 
@@ -7122,7 +6999,7 @@ elif [[ $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 && $DC_AUTH_OK -eq 1 ]]; then
     echo
     alert "${BLUE}Tip:${RESET} LDAP, Kerberos, and authorized DC access detected"
     echo "  --------------------------------------"
-    echo -e "    Re-run with ${BLUE}--run-blood${RESET} for a read-focused DCOnly collection"
+    echo -e "    Re-run with ${BLUE}--run-blood${RESET} for BloodHound collection (CE All; legacy DCOnly fallback)"
     echo "    Example:"
     printf '      %s\n' "$(sps_shell_join ./fathomtrace "$TARGET" --run-blood)"
 fi
@@ -7148,9 +7025,6 @@ generate_synopsis() {
     if [ -n "$AUTH_USER" ] && [ -n "$AUTH_PASS" ]; then
         echo -e "   - User:      ${YELLOW}$AUTH_USER${RESET}"
         echo -e "   - Password:  ${YELLOW}$MASKED_AUTH_PASS${RESET}"
-    elif [[ -n "$AUTH_USER" && -n "$AUTH_NTLM_HASH" ]]; then
-        echo -e "   - User:      ${YELLOW}$AUTH_USER${RESET}"
-        echo -e "   - NT hash:   ${YELLOW}$MASKED_NTLM_HASH${RESET}"
     fi
     if [ -n "$AUTH_DOMAIN" ] ; then
         echo -e "   - Domain:    ${YELLOW}$AUTH_DOMAIN${RESET}"
@@ -7339,6 +7213,19 @@ attack_path_evaluation() {
         critical "Attack Path: Authenticated RDP remote-service opportunity (MITRE ATT&CK T1021.001)"
         note "Evidence: non-interactive ${RDP_AUTH_PROVIDER:-RDP provider} credential validation succeeded for $AUTH_USER on $TARGET_IPV4:3389"
         lightbulb "Next step: confirm Remote Desktop logon rights and authorization before starting an interactive RDP session."
+        echo
+    fi
+    if [[ "${IMAP_AUTH_OK:-false}" == true ]]; then
+        echo -e "\n ${CYAN}AUTHENTICATED MAIL ACCESS${RESET}"
+        echo -e " --------------------------------------"
+        ATTACK_PATHS+=("Authenticated IMAP mailbox access for ${AUTH_USER}")
+        success "$(sps_imap_auth_success_text)"
+        finding "Attack Path: Valid credentials provide encrypted IMAP mailbox access"
+        note "Evidence: the server returned a tagged OK response to one LOGIN attempt over ${IMAP_AUTH_TRANSPORT:-encrypted} TLS."
+        lightbulb "Next step: review authorized mailbox scope; use --imap-enum or --imap-dump only when message access is explicitly permitted."
+        if sps_imap_dump_has_exported_messages; then
+            sps_imap_print_attack_path_details
+        fi
         echo
     fi
     # ---------------------------------------------------------------------------
@@ -8151,8 +8038,23 @@ info "Service states (port open / service confirmed / access confirmed):"
 printf '    LDAP:     %s / %s / %s\n' "$LDAP_PORT_OPEN" "$LDAP_SERVICE_CONFIRMED" "$LDAP_ACCESS_CONFIRMED"
 printf '    Kerberos: %s / %s / %s\n' "$KERBEROS_PORT_OPEN" "$KERBEROS_SERVICE_CONFIRMED" "$KERBEROS_ACCESS_CONFIRMED"
 printf '    SMB:      %s / %s / %s\n' "$SMB_PORT_OPEN" "$SMB_SERVICE_CONFIRMED" "$SMB_ACCESS_CONFIRMED"
+printf '    SMTP:     %s / %s / n/a\n' "$SMTP_PORT_OPEN" "$SMTP_SERVICE_CONFIRMED"
+printf '    POP3:     %s / %s / n/a\n' "$POP3_PORT_OPEN" "$POP3_SERVICE_CONFIRMED"
+printf '    IMAP:     %s / %s / %s\n' "$IMAP_PORT_OPEN" "$IMAP_SERVICE_CONFIRMED" "${IMAP_AUTH_OK:-false}"
+printf '    SNMP/UDP: %s / %s / %s\n' "$SNMP_PORT_OPEN" "$SNMP_SERVICE_CONFIRMED" "$SNMP_PUBLIC_ACCESS_CONFIRMED"
 printf '    Web:      %s / %s / %s\n' "$WEB_PORT_OPEN" "$WEB_SERVICE_CONFIRMED" "$WEB_ACCESS_CONFIRMED"
 printf '    RDP auth: %s\n' "$(sps_rdp_auth_summary)"
+
+if [[ "${IMAP_AUTH_OK:-false}" == true ]]; then
+    echo
+    success "$(sps_imap_auth_success_text)"
+    finding "Authenticated IMAP access is confirmed; mailbox enumeration and read-only export remain explicit opt-ins."
+fi
+if [[ "${SNMP_SERVICE_CONFIRMED:-false}" == true ]]; then
+    echo
+    success "SNMP service confirmed on UDP/161"
+    [[ -n "${SNMP_SYS_DESCR:-}" ]] && finding "SNMP device description: $SNMP_SYS_DESCR"
+fi
 
 if [[ $HAS_SMB -eq 1 && $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 ]]; then
     alert "Observed AD-related service surface: SMB, LDAP, and Kerberos"
@@ -8165,7 +8067,7 @@ if [[ $HAS_KERB -eq 1 && "$ENABLE_KERB_ENUM" != true ]]; then
     lightbulb "Optional next run: --kerb-enum performs only a small common-user probe, not comprehensive enumeration."
 fi
 if [[ $HAS_LDAP -eq 1 && $HAS_KERB -eq 1 && "$CREDS_PROVIDED" == true && "$ENABLE_BH_EXPORT" != true ]]; then
-    lightbulb "Optional next run: --run-blood performs a read-focused DCOnly collection when a DC hostname is known."
+    lightbulb "Optional next run: --run-blood prefers BloodHound CE All collection and falls back to legacy DCOnly."
 fi
 [[ $HAS_SMB -eq 1 ]] && alert "Observed file-sharing surface: SMB"
 [[ "$NFS_FOUND" == true ]] && alert "Observed file-sharing surface: NFS"
@@ -8259,7 +8161,7 @@ cat <<EOF
       • Kerberoastable SPNs
       • Delegation misconfigurations
   - Tools:
-      ldapsearch, ldapdomaindump, bloodhound-ce-python, bloodhound-python
+      ldapsearch, ldapdomaindump, bloodhound-python
 EOF
 	;;
         RDP)
@@ -8284,6 +8186,15 @@ cat <<EOF
 [DNS]
   - Attempt zone transfers (AXFR)
   - Enumerate subdomains
+EOF
+        ;;
+        SNMP)
+cat <<EOF
+[SNMP]
+  - Review sysDescr and other read-only system identity values
+  - Replace default communities and prefer SNMPv3 authentication/encryption
+  - Restrict UDP/161 to authorized management networks
+  - Tools: snmpget, snmpwalk, nmap -sU -sV -p 161
 EOF
         ;;
         WINRM)
