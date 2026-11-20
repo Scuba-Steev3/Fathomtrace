@@ -263,8 +263,20 @@ elif name in ("mysql", "mariadb"):
 else:
     sys.exit(1)
 
-version = "".join(c for c in version[:160] if c.isascii() and c.isprintable()).strip()
-print(f"{engine} (version {version})" if version else engine)
+def clean_metadata(value):
+    return "".join(c for c in value[:160] if c.isascii() and c.isprintable()).strip()
+
+os_hint = clean_metadata(service.get("ostype", ""))
+if not os_hint:
+    import re
+
+    banner = " ".join((product, version, service.get("extrainfo", "")))
+    match = re.search(r"(?<![A-Za-z])(Ubuntu|Debian|Windows|Linux|FreeBSD|Alpine|CentOS|Red Hat)(?![A-Za-z])", banner, re.IGNORECASE)
+    if match:
+        os_hint = match.group(1).title()
+
+version = clean_metadata(version) or "unknown"
+print(f"{engine} (version {version}; OS hint: {os_hint or 'unknown'})")
 ' "$port" <<< "$xml")" || return 1
 
     evidence="$metadata confirmed by service probe on TCP/$port"

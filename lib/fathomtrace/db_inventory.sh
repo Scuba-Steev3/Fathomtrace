@@ -7,6 +7,7 @@ Usage: fathomtrace db-inventory ENGINE HOST USER [PORT] [--skip-ssl-verify-serve
 ENGINE: mssql, mysql, or mariadb. HOST: DNS name or IPv4 address.
 PORT defaults to 1433 for mssql and 3306 for mysql or mariadb.
 The native client prompts for the password and verifies the server certificate.
+Inventory also reports the OS or build platform advertised by the server.
 MySQL and MariaDB accept the optional flag to skip certificate verification.
 EOF
 }
@@ -56,6 +57,11 @@ sps_db_inventory() {
     if [[ "$engine" == mssql ]]; then
         query="$(cat << 'SQL'
 SET NOCOUNT ON;
+SELECT CASE
+    WHEN LOWER(@@VERSION) LIKE '% on linux%' THEN 'Linux'
+    WHEN LOWER(@@VERSION) LIKE '% on windows%' THEN 'Windows'
+    ELSE 'Unknown'
+END AS server_os_hint;
 SELECT name AS database_name FROM sys.databases ORDER BY name;
 
 DECLARE @db sysname, @sql nvarchar(max), @failed bit = 0;
@@ -141,6 +147,8 @@ SQL
     fi
 
     query="$(cat << 'SQL'
+SELECT @@version_compile_os AS server_build_os,
+       @@version_comment AS server_version_comment;
 SELECT SCHEMA_NAME AS database_name
 FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME;
 SELECT TABLE_SCHEMA AS database_name, TABLE_NAME AS table_name
