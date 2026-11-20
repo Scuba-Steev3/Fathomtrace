@@ -223,6 +223,60 @@ sps_probe_web_protocol() {
     return 1
 }
 
+sps_probe_database_protocol() {
+    local port="$1"
+    local xml metadata evidence
+
+    sps_command_available nmap && sps_command_available python3 || return 1
+    xml="$(timeout --kill-after=2s 15s nmap -n -Pn -sT -sV --version-light \
+        -p "$port" -oX - "$TARGET_IPV4" 2> /dev/null)" || return 1
+
+    metadata="$(python3 -c '
+import sys
+import xml.etree.ElementTree as ET
+
+try:
+    root = ET.parse(sys.stdin).getroot()
+except ET.ParseError:
+    sys.exit(1)
+
+port_id = int(sys.argv[1])
+port = root.find(f"./host/ports/port[@protocol=\"tcp\"][@portid=\"{port_id}\"]")
+if port is None or port.find("./state[@state=\"open\"]") is None:
+    sys.exit(1)
+service = port.find("./service[@method=\"probed\"]")
+if service is None:
+    sys.exit(1)
+
+name = service.get("name", "")
+product = service.get("product", "")
+version = service.get("version", "")
+if name == "ms-sql-s":
+    engine = "Microsoft SQL Server"
+elif name in ("mysql", "mariadb"):
+    if name == "mariadb" or "mariadb" in f"{product} {version}".lower():
+        engine = "MariaDB"
+    elif product.lower() == "mysql":
+        engine = "MySQL"
+    else:
+        engine = "MySQL-compatible server"
+else:
+    sys.exit(1)
+
+version = "".join(c for c in version[:160] if c.isascii() and c.isprintable()).strip()
+print(f"{engine} (version {version})" if version else engine)
+' "$port" <<< "$xml")" || return 1
+
+    evidence="$metadata confirmed by service probe on TCP/$port"
+    finding "$evidence"
+    sps_record_finding \
+        "DB-SERVICE-$port" "informational" "high" \
+        "$evidence" "TCP port $port open|Database protocol matched" "" \
+        "discovery" "" \
+        "Restrict the database listener to intended clients." \
+        "No credentials or SQL statements were sent."
+}
+
 sps_probe_open_port() {
     local port="$1"
     local redirect host_name ldap_uri ldap_dn ldap_output ldap_rc=0 scheme
@@ -234,6 +288,10 @@ sps_probe_open_port() {
         sps_probe_web_protocol "$port" || true
     fi
     [[ "${SKIP_PREFLIGHT:-false}" == true ]] && return 0
+
+    case "$port" in
+        1433 | 3306) sps_probe_database_protocol "$port" || debug "Database fingerprint unavailable on TCP/$port" ;;
+    esac
 
     if grep -Eq ":${port}$" "$WEB_SERVICES_FILE" 2> /dev/null && sps_command_available curl; then
         scheme="$(awk -F: -v port="$port" '$2 == port {print $1; exit}' "$WEB_SERVICES_FILE")"

@@ -149,6 +149,32 @@ The historical form remains valid:
 
 Run `fathomtrace --help` for the canonical reference.
 
+Database discovery fingerprints open TCP/1433 and TCP/3306 with Nmap and
+Python 3 when both are available. It reports Microsoft SQL Server, MySQL, or
+MariaDB and the version when identified. Generic protocol matches are reported
+as MySQL-compatible. This probe does not log in or execute SQL. Use
+`--skip-preflight` to disable it.
+
+### Credentialed database inventory
+
+Run the inventory command in an interactive terminal with a DNS hostname that
+matches the server certificate. The native client prompts for the password.
+
+```bash
+fathomtrace db-inventory mysql mysql.example.org inventory_reader
+fathomtrace db-inventory mariadb maria.example.org inventory_reader 3307
+fathomtrace db-inventory mssql sql.example.org inventory_reader
+```
+
+On Kali, install `mariadb-client` for MySQL and MariaDB. SQL Server requires
+Microsoft's ODBC `sqlcmd` (`mssql-tools18`) on PATH. For MySQL or MariaDB with
+a private CA, set `FATHOMTRACE_DB_CA_FILE` to its PEM CA bundle. SQL Server
+uses the ODBC client's trust store.
+
+The command prints database and base-table names visible to the supplied
+account. SQL Server table inventory covers accessible online databases.
+Client errors appear on the terminal and return a nonzero exit status.
+
 | Group | Options |
 |---|---|
 | Commands | `scan`, `help`, `version` |

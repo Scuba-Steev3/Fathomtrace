@@ -123,6 +123,13 @@ if [[ -z "$FATHOMTRACE_LIB_DIR" || ! -r "$FATHOMTRACE_LIB_DIR/cli.sh" ]]; then
     printf '[-] Error: Fathomtrace libraries were not found. Set FATHOMTRACE_LIB_DIR or reinstall Fathomtrace.\n' >&2
     exit 4
 fi
+if [[ "${1:-}" == db-inventory ]]; then
+    shift
+    source "$FATHOMTRACE_LIB_DIR/db_inventory.sh"
+    sps_db_inventory "$@"
+    exit $?
+fi
+
 source "$FATHOMTRACE_LIB_DIR/cli.sh"
 source "$FATHOMTRACE_LIB_DIR/output.sh"
 source "$FATHOMTRACE_LIB_DIR/validation.sh"

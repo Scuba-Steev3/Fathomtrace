@@ -469,6 +469,7 @@ sps_print_help() {
     cat << 'EOF'
 Usage:
   fathomtrace [scan] [TARGET] [OPTIONS]
+  fathomtrace db-inventory ENGINE HOST USER [PORT]
   fathomtrace help | --help
 
 Scan one IPv4 address or hostname with a bounded-concurrency TCP profile and a
