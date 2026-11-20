@@ -166,10 +166,16 @@ fathomtrace db-inventory mariadb maria.example.org inventory_reader 3307
 fathomtrace db-inventory mssql sql.example.org inventory_reader
 ```
 
-On Kali, install `mariadb-client` for MySQL and MariaDB. SQL Server requires
-Microsoft's ODBC `sqlcmd` (`mssql-tools18`) on PATH. For MySQL or MariaDB with
-a private CA, set `FATHOMTRACE_DB_CA_FILE` to its PEM CA bundle. SQL Server
-uses the ODBC client's trust store.
+On Kali, install `python3-pymssql` for SQL Server and `mariadb-client` for
+MySQL and MariaDB. SQL Server also supports Microsoft's ODBC `sqlcmd`
+(`mssql-tools18`) when pymssql is unavailable. For a private CA, set
+`FATHOMTRACE_DB_CA_FILE` to its PEM CA bundle when using pymssql, MySQL, or
+MariaDB. The inventory command can use either Kali's `mysql` compatibility
+command or the `mariadb` executable. ODBC sqlcmd uses the system trust store.
+
+For MySQL or MariaDB, append `--skip-ssl-verify-server-cert` to opt out of
+certificate verification. Oracle MySQL still requires TLS. The MariaDB client
+can fall back to an unencrypted connection with this flag.
 
 The command prints database and base-table names visible to the supplied
 account. SQL Server table inventory covers accessible online databases.

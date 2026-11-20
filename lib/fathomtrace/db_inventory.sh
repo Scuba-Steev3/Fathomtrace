@@ -2,11 +2,12 @@
 
 sps_db_inventory_usage() {
     cat << 'EOF'
-Usage: fathomtrace db-inventory ENGINE HOST USER [PORT]
+Usage: fathomtrace db-inventory ENGINE HOST USER [PORT] [--skip-ssl-verify-server-cert]
 
 ENGINE: mssql, mysql, or mariadb. HOST: DNS name or IPv4 address.
 PORT defaults to 1433 for mssql and 3306 for mysql or mariadb.
 The native client prompts for the password and verifies the server certificate.
+MySQL and MariaDB accept the optional flag to skip certificate verification.
 EOF
 }
 
@@ -15,22 +16,32 @@ sps_db_inventory() {
         sps_db_inventory_usage
         return 0
     fi
-    if (( $# < 3 || $# > 4 )); then
+    if (( $# < 3 || $# > 5 )); then
         sps_db_inventory_usage >&2
         return 2
     fi
 
     local engine="$1" host="$2" user="$3" port query
-    local ca_file
-    local -a client
+    local ca_file client_name client_family mysql_help skip_verify=false
+    local -a client tls_args
     case "$engine" in
         mssql) port=1433 ;;
         mysql | mariadb) port=3306 ;;
         *) sps_db_inventory_usage >&2; return 2 ;;
     esac
 
-    if (( $# == 4 )); then
-        port="$4"
+    shift 3
+    if (( $# > 0 )) && [[ "$1" != --* ]]; then
+        port="$1"
+        shift
+    fi
+    if (( $# == 1 )) && [[ "$1" == --skip-ssl-verify-server-cert && "$engine" != mssql ]]; then
+        skip_verify=true
+        shift
+    fi
+    if (( $# > 0 )); then
+        sps_db_inventory_usage >&2
+        return 2
     fi
     if [[ ! "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ || -z "$user" || "$user" == -* ||
         ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
@@ -43,11 +54,6 @@ sps_db_inventory() {
     fi
 
     if [[ "$engine" == mssql ]]; then
-        if ! command -v sqlcmd > /dev/null 2>&1; then
-            printf '%s\n' 'Install Microsoft ODBC sqlcmd (mssql-tools18) to inventory SQL Server.' >&2
-            return 4
-        fi
-
         query="$(cat << 'SQL'
 SET NOCOUNT ON;
 SELECT name AS database_name FROM sys.databases ORDER BY name;
@@ -81,26 +87,57 @@ IF @failed = 1
     RAISERROR(N'Table inventory is incomplete.', 11, 1);
 SQL
 )"
+        if command -v python3 > /dev/null 2>&1 && python3 -c 'import pymssql' 2> /dev/null; then
+            sps_db_inventory_freetds "$host" "$port" "$user" "$query"
+            return $?
+        fi
+        if ! command -v sqlcmd > /dev/null 2>&1; then
+            printf '%s\n' 'Install python3-pymssql from Kali APT, or Microsoft ODBC sqlcmd (mssql-tools18).' >&2
+            return 4
+        fi
         env -u SQLCMDPASSWORD -u SQLCMDINI sqlcmd -S "tcp:$host,$port" -d master \
             -U "$user" -N -b -l 10 -t 30 -Q "$query"
         return $?
     fi
 
     if [[ "$engine" == mariadb ]] && command -v mariadb > /dev/null 2>&1; then
-        client=(mariadb --no-defaults --ssl --ssl-verify-server-cert)
-    elif command -v mysql > /dev/null 2>&1 && mysql --no-defaults --help 2> /dev/null | grep -F -- '--ssl-mode' > /dev/null; then
-        client=(mysql --no-defaults --ssl-mode=VERIFY_IDENTITY)
-    elif command -v mariadb > /dev/null 2>&1; then
-        client=(mariadb --no-defaults --ssl --ssl-verify-server-cert)
-    else
+        client_name=mariadb
+        client_family=mariadb
+    elif command -v mysql > /dev/null 2>&1; then
+        mysql_help="$(mysql --no-defaults --help 2> /dev/null)" || mysql_help=""
+        case "$mysql_help" in
+            *--ssl-mode*) client_name=mysql; client_family=mysql ;;
+            *--ssl-verify-server-cert*) client_name=mysql; client_family=mariadb ;;
+        esac
+    fi
+    if [[ -z "${client_name:-}" ]] && command -v mariadb > /dev/null 2>&1; then
+        client_name=mariadb
+        client_family=mariadb
+    fi
+    if [[ -z "${client_name:-}" ]]; then
         printf '%s\n' 'Install the MariaDB client or the Oracle MySQL client.' >&2
         return 4
     fi
 
-    ca_file="${FATHOMTRACE_DB_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}"
-    if [[ ! -f "$ca_file" || ! -r "$ca_file" ]]; then
-        printf 'Database CA bundle is unavailable: %s\n' "$ca_file" >&2
-        return 4
+    client=("$client_name" --no-defaults)
+    if [[ "$skip_verify" == true ]]; then
+        if [[ "$client_family" == mysql ]]; then
+            tls_args=(--ssl-mode=REQUIRED)
+        else
+            tls_args=(--ssl --skip-ssl-verify-server-cert)
+            printf '%s\n' 'MariaDB client certificate verification is disabled and the client may fall back to plaintext.' >&2
+        fi
+    else
+        ca_file="${FATHOMTRACE_DB_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+        if [[ ! -f "$ca_file" || ! -r "$ca_file" ]]; then
+            printf 'Database CA bundle is unavailable: %s\n' "$ca_file" >&2
+            return 4
+        fi
+        if [[ "$client_family" == mysql ]]; then
+            tls_args=(--ssl-mode=VERIFY_IDENTITY --ssl-ca="$ca_file")
+        else
+            tls_args=(--ssl --ssl-verify-server-cert --ssl-ca="$ca_file")
+        fi
     fi
 
     query="$(cat << 'SQL'
@@ -112,6 +149,65 @@ ORDER BY TABLE_SCHEMA, TABLE_NAME;
 SQL
 )"
     env -u MYSQL_PWD "${client[@]}" --protocol=TCP --connect-timeout=10 \
-        --host="$host" --port="$port" --user="$user" --password --ssl-ca="$ca_file" \
+        --host="$host" --port="$port" --user="$user" --password "${tls_args[@]}" \
         --batch --execute="$query"
+}
+
+sps_db_inventory_freetds() {
+    python3 - "$@" << 'PYTHON'
+import os
+import sys
+from contextlib import closing
+from getpass import getpass
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+host, port, user, query = sys.argv[1:]
+ca_file = os.environ.get("FATHOMTRACE_DB_CA_FILE", "system")
+if ca_file != "system":
+    ca_file = str(Path(ca_file).resolve())
+    if any(character in ca_file for character in "\r\n;#") or not Path(ca_file).is_file():
+        sys.exit("Invalid database CA bundle path.")
+
+with TemporaryDirectory(prefix="fathomtrace-db-") as directory:
+    config = Path(directory) / "freetds.conf"
+    config.write_text(
+        "[fathomtrace_inventory]\n"
+        f"host = {host}\n"
+        f"port = {port}\n"
+        "tds version = 7.4\n"
+        "encryption = require\n"
+        f"ca file = {ca_file}\n"
+        "check certificate hostname = yes\n"
+        f"certificate hostname = {host}\n",
+        encoding="utf-8",
+    )
+    for variable in ("TDSHOST", "TDSPORT", "TDSVER", "TDSENCRYPTION", "TDSDUMP", "TDSDUMPCONFIG"):
+        os.environ.pop(variable, None)
+    os.environ["FREETDSCONF"] = str(config)
+
+    import pymssql
+
+    try:
+        with closing(pymssql.connect(
+            server="fathomtrace_inventory",
+            port=port,
+            user=user,
+            password=getpass("SQL Server password: "),
+            database="master",
+            login_timeout=10,
+            timeout=30,
+            autocommit=True,
+        )) as connection, closing(connection.cursor()) as cursor:
+            cursor.execute(query)
+            while True:
+                if cursor.description:
+                    print("\t".join(column[0] for column in cursor.description))
+                    for row in cursor:
+                        print("\t".join(str(value) for value in row))
+                if not cursor.nextset():
+                    break
+    except pymssql.Error as error:
+        sys.exit(f"SQL Server inventory failed: {error}")
+PYTHON
 }

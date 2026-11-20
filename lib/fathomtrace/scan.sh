@@ -373,7 +373,7 @@ run_port_scan() {
     local -a pids=()
     local -a result_files=()
     local entry port service level result_file temporary pid
-    local result_dir
+    local result_dir db_engine db_command
 
     result_dir="$(mktemp -d "$RUNTIME_TMP_DIR/port-results.XXXXXX")"
     sps_section "Running Port Scan"
@@ -408,6 +408,14 @@ run_port_scan() {
         printf '%s\n' "$port" >> "$OPEN_PORTS_FILE"
         success "Port $port OPEN ($service)"
         sps_classify_open_port "$port"
+        case "$port" in
+            1433) db_engine=mssql ;;
+            3306) db_engine=mysql ;;
+            *) continue ;;
+        esac
+        printf -v db_command 'fathomtrace db-inventory %s %q %q %s' \
+            "$db_engine" "${TARGET:-$target}" "${AUTH_USER:-YOUR_DB_USER}" "$port"
+        info "If this is a database listener, list visible databases and tables: $db_command"
     done
 
 }
