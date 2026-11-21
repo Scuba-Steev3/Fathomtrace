@@ -170,6 +170,7 @@ ENABLE_KERBROAST=false
 KERBEROS_FOUND=false
 NTLM_ENABLED=false
 NTLM_TIME_SYNC_NOTE_SHOWN=false
+MSSQL_ANONYMOUS_DENIED=false
 MSSQL_NULL_LOGIN=false
 MSSQL_AUTH_OK=false
 MSSQL_LCLAUTH_OK=false
@@ -6262,12 +6263,7 @@ if [[ "$HAS_MSSQL" == "true" && "$ENABLE_MSSQL_ENUM" == "true" ]]; then
             sps_record_finding "MSSQL-ANONYMOUS-DENIED" "informational" "high" \
                 "SQL Server explicitly rejected anonymous login on TCP/1433." \
                 "SQL Server responded" "" "discovery" "" "" ""
-            sps_refresh_service_states
-            info "Recon summary for $TARGET_IPV4 (later active checks skipped)"
-            info "Open TCP ports: ${OPEN_PORTS[*]}"
-            info "SMB access confirmed: $SMB_ACCESS_CONFIRMED"
-            info "MSSQL anonymous access: denied"
-            exit 0
+            MSSQL_ANONYMOUS_DENIED=true
         elif ((mssql_probe_rc != 0)); then
             error "MSSQL probe failed with exit code $mssql_probe_rc"
             exit "$mssql_probe_rc"
@@ -6287,16 +6283,18 @@ if [[ "$HAS_MSSQL" == "true" && "$ENABLE_MSSQL_ENUM" == "true" ]]; then
 
         
         # Extract any username if present
+        if [[ "$MSSQL_ANONYMOUS_DENIED" != true ]]; then
         MSSQL_USER=$(echo "$MSSQL_ENUM_OUTPUT" | grep -oP '\+\] \K\S+(?=[:@])' | head -n1)
         if [[ -n "$MSSQL_USER" ]]; then
             lightbulb "Valid user identified from service banner: ${YELLOW}$MSSQL_USER${RESET}"
+        fi
         fi
         else
             debug "MSSQL NULL login check skipped by --skip-null-checks"
         fi
 
         # 2. Try default credentials
-        if [[ "$ENABLE_MSSQL_BRUTE" == true ]]; then
+        if [[ "$MSSQL_ANONYMOUS_DENIED" != true && "$ENABLE_MSSQL_BRUTE" == true ]]; then
             echo
             info "Testing default MSSQL credentials..."
             declare -a DEFAULT_USERS=("sa" "admin" "sql" "sqladmin" "dbo" "dba")
@@ -6337,6 +6335,7 @@ fi
 #############################################
 # Check to see what Credentials can access
 #############################################
+if [[ "$MSSQL_ANONYMOUS_DENIED" != true ]]; then
 sps_run_rdp_auth_check "$TARGET_IPV4"
 
 if $CREDS_PROVIDED; then
@@ -7033,6 +7032,14 @@ if [[ "$HAS_MSSQL" == true && "$ENABLE_MSSQL_BRUTE" == false ]]; then
     echo -e "    Re-run with ${BLUE}--mssql-brute${RESET} to attempt 'safe' user brute force"
     echo "    Example:"
     echo "      ./fathomtrace $TARGET_IPV4 --mssql-brute"
+fi
+
+else
+    info 'MSSQL anonymous access denied. Later active checks skipped. Generating full scan report.'
+    ESCALATION_PRIVS_FOUND=false
+    SE_BACKUP_PRIV=false
+    SE_IMPERSONATE_PRIV=false
+    sps_refresh_service_states
 fi
 
 # Initialize NTLM Detection
