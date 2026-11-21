@@ -15,6 +15,9 @@ All notable changes to this repository will be documented in this file.
 
 ### Changed
 
+- Bumped Fathomtrace to 2.1.3 for database version and OS hints in scans
+  and hostname and OS metadata in authenticated database inventory. SQL Server scans also report instance and hostname when available.
+
 - Raised the application version to 2.1.1 for BloodHound CE support and the
   optional DACL-audit bypass.
 - Promoted successful IMAP authentication into both the Attack Path Decision

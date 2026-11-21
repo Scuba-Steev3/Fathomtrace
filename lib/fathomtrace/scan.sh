@@ -228,8 +228,13 @@ sps_probe_database_protocol() {
     local xml metadata evidence
 
     sps_command_available nmap && sps_command_available python3 || return 1
-    xml="$(timeout --kill-after=2s 15s nmap -n -Pn -sT -sV --version-light \
-        -p "$port" -oX - "$TARGET_IPV4" 2> /dev/null)" || return 1
+    local -a script_args=()
+    if [[ "$port" == 1433 ]]; then
+        script_args=(--script ms-sql-info,ms-sql-ntlm-info
+            --script-args "mssql.instance-port=$port,mssql.scanned-ports-only=true")
+    fi
+    xml="$(timeout --kill-after=2s 30s nmap -n -Pn -sT -sV --version-light \
+        "${script_args[@]}" -p "$port" -oX - "$TARGET_IPV4" 2> /dev/null)" || return 1
 
     metadata="$(python3 -c '
 import sys
@@ -276,7 +281,23 @@ if not os_hint:
         os_hint = match.group(1).title()
 
 version = clean_metadata(version) or "unknown"
-print(f"{engine} (version {version}; OS hint: {os_hint or 'unknown'})")
+os_hint = os_hint or "unknown"
+details = f"{engine} (version {version}; OS hint: {os_hint})"
+if name == "ms-sql-s":
+    fields = {}
+    for script in port.findall("script"):
+        if script.get("id") not in ("ms-sql-info", "ms-sql-ntlm-info"):
+            continue
+        for line in script.get("output", "").splitlines():
+            key, separator, value = line.strip().partition(":")
+            if separator and value.strip():
+                fields[key] = clean_metadata(value.strip())
+    hostname = fields.get("DNS_Computer_Name") or fields.get("NetBIOS_Computer_Name")
+    for label, value in (("instance", fields.get("Instance name")), ("hostname", hostname),
+                         ("SQL build", fields.get("number")), ("OS build", fields.get("Product_Version"))):
+        if value:
+            details += f"; {label}: {value}"
+print(details)
 ' "$port" <<< "$xml")" || return 1
 
     evidence="$metadata confirmed by service probe on TCP/$port"

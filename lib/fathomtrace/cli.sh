@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # Values are consumed by the sourcing entry point.
 
-SPS_VERSION="2.1.1"
+SPS_VERSION="2.1.3"
 
 sps_cli_defaults() {
     COMMAND="scan"
@@ -469,7 +469,7 @@ sps_print_help() {
     cat << 'EOF'
 Usage:
   fathomtrace [scan] [TARGET] [OPTIONS]
-  fathomtrace db-inventory ENGINE HOST USER [PORT]
+  fathomtrace db-inventory ENGINE HOST USER [PORT] [--skip-ssl-verify-server-cert]
   fathomtrace help | --help
 
 Scan one IPv4 address or hostname with a bounded-concurrency TCP profile and a
