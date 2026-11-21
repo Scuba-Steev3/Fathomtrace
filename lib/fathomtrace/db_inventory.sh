@@ -2,11 +2,12 @@
 
 sps_db_inventory_usage() {
     cat << 'EOF'
-Usage: fathomtrace db-inventory ENGINE HOST USER [PORT] [--skip-ssl-verify-server-cert]
+Usage: fathomtrace db-inventory ENGINE HOST USER [PORT] [--windows-auth] [--skip-ssl-verify-server-cert]
 
 ENGINE: mssql, mysql, or mariadb. HOST: DNS name or IPv4 address.
 PORT defaults to 1433 for mssql and 3306 for mysql or mariadb.
 The native client prompts for the password and verifies the server certificate.
+For MSSQL Windows authentication, use --windows-auth and quote DOMAIN\user or HOST\user.
 Inventory reports the server hostname and advertised OS or build platform.
 For any supported engine, pass --skip-ssl-verify-server-cert after USER or PORT.
 EOF
@@ -17,13 +18,13 @@ sps_db_inventory() {
         sps_db_inventory_usage
         return 0
     fi
-    if (( $# < 3 || $# > 5 )); then
+    if (( $# < 3 || $# > 6 )); then
         sps_db_inventory_usage >&2
         return 2
     fi
 
     local engine="$1" host="$2" user="$3" port query
-    local ca_file client_name client_family mysql_help skip_verify=false
+    local ca_file client_name client_family mysql_help skip_verify=false windows_auth=false
     local -a client tls_args
     case "$engine" in
         mssql) port=1433 ;;
@@ -36,14 +37,21 @@ sps_db_inventory() {
         port="$1"
         shift
     fi
-    if (( $# == 1 )) && [[ "$1" == --skip-ssl-verify-server-cert ]]; then
-        skip_verify=true
+    while (( $# )); do
+        case "$1" in
+            --windows-auth) windows_auth=true ;;
+            --skip-ssl-verify-server-cert) skip_verify=true ;;
+            *) sps_db_inventory_usage >&2; return 2 ;;
+        esac
         shift
+    done
+    if [[ "$windows_auth" == true ]]; then
+        if [[ "$engine" != mssql || ! "$user" =~ ^[^\\]+\\[^\\]+$ ]]; then
+            printf '%s\n' 'Windows authentication requires mssql and a qualified DOMAIN\user or HOST\user.' >&2
+            return 2
+        fi
     fi
-    if (( $# > 0 )); then
-        sps_db_inventory_usage >&2
-        return 2
-    fi
+
     if [[ ! "$host" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ || -z "$user" || "$user" == -* ||
         ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
         printf '%s\n' 'Invalid database host, username, or port.' >&2
@@ -101,6 +109,10 @@ SQL
         if command -v python3 > /dev/null 2>&1 && python3 -c 'import pymssql' 2> /dev/null; then
             sps_db_inventory_freetds "$host" "$port" "$user" "$query" "$skip_verify"
             return $?
+        fi
+        if [[ "$windows_auth" == true ]]; then
+            printf '%s\n' 'Install python3-pymssql from Kali APT for Windows password authentication.' >&2
+            return 4
         fi
         if ! command -v sqlcmd > /dev/null 2>&1; then
             printf '%s\n' 'Install python3-pymssql from Kali APT, or Microsoft ODBC sqlcmd (mssql-tools18).' >&2
