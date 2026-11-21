@@ -74,17 +74,17 @@ fi
 
 run_cli version --version
 assert_eq 0 "$CLI_RC" "version exits successfully"
-assert_contains "$CLI_STDOUT" "fathomtrace 2.1.1" "version is stable"
+assert_contains "$CLI_STDOUT" "fathomtrace 2.1.3" "version is stable"
 
 "$LEGACY_SCRIPT" --version > "$TEST_TMP/legacy.stdout" 2> "$TEST_TMP/legacy.stderr"
 assert_eq 0 "$?" "legacy command wrapper exits successfully"
-assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.1" "legacy command wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.3" "legacy command wrapper delegates to Fathomtrace"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix" --no-legacy-wrapper > "$TEST_TMP/install.stdout" 2> "$TEST_TMP/install.stderr"
 assert_eq 0 "$?" "prefix installer exits successfully"
 "$TEST_TMP/install-prefix/bin/fathomtrace" --version > "$TEST_TMP/installed.stdout" 2> "$TEST_TMP/installed.stderr"
 assert_eq 0 "$?" "installed prefix layout resolves libraries"
-assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.1" "installed command reports the Fathomtrace version"
+assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.3" "installed command reports the Fathomtrace version"
 assert_no_file "$TEST_TMP/install-prefix/bin/bash_simpleportscan.sh" "installer can omit the legacy wrapper"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix-legacy" > "$TEST_TMP/install-legacy.stdout" 2> "$TEST_TMP/install-legacy.stderr"
@@ -92,7 +92,7 @@ assert_eq 0 "$?" "default installer exits successfully"
 assert_file "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" "default installer includes the legacy wrapper"
 "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" --version > "$TEST_TMP/installed-legacy.stdout" 2> "$TEST_TMP/installed-legacy.stderr"
 assert_eq 0 "$?" "installed legacy wrapper exits successfully"
-assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.1" "installed legacy wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.3" "installed legacy wrapper delegates to Fathomtrace"
 
 run_cli unknown --definitely-unknown
 assert_eq 2 "$CLI_RC" "unknown option uses CLI exit code"
@@ -378,7 +378,7 @@ assert_not_contains "$CLI_STDOUT" "Authorized Recon" "CSV stdout has no banner"
 run_cli no-color 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --ascii --ports 80
 assert_eq 0 "$CLI_RC" "no-color dry run succeeds"
 assert_not_contains "$CLI_STDOUT" $'\033[' "no-color removes ANSI sequences"
-assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.1" "text startup banner includes the application version"
+assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.3" "text startup banner includes the application version"
 assert_contains "$CLI_STDOUT" "[*] Validating target" "ASCII information icon is used"
 
 run_cli force-color 127.0.0.1 --dry-run --no-loot --skip-preflight --color always --ascii --ports 80
