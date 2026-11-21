@@ -8,7 +8,7 @@ ENGINE: mssql, mysql, or mariadb. HOST: DNS name or IPv4 address.
 PORT defaults to 1433 for mssql and 3306 for mysql or mariadb.
 The native client prompts for the password and verifies the server certificate.
 Inventory reports the server hostname and advertised OS or build platform.
-For MySQL or MariaDB, pass --skip-ssl-verify-server-cert after USER or PORT.
+For any supported engine, pass --skip-ssl-verify-server-cert after USER or PORT.
 EOF
 }
 
@@ -36,7 +36,7 @@ sps_db_inventory() {
         port="$1"
         shift
     fi
-    if (( $# == 1 )) && [[ "$1" == --skip-ssl-verify-server-cert && "$engine" != mssql ]]; then
+    if (( $# == 1 )) && [[ "$1" == --skip-ssl-verify-server-cert ]]; then
         skip_verify=true
         shift
     fi
@@ -99,15 +99,17 @@ IF @failed = 1
 SQL
 )"
         if command -v python3 > /dev/null 2>&1 && python3 -c 'import pymssql' 2> /dev/null; then
-            sps_db_inventory_freetds "$host" "$port" "$user" "$query"
+            sps_db_inventory_freetds "$host" "$port" "$user" "$query" "$skip_verify"
             return $?
         fi
         if ! command -v sqlcmd > /dev/null 2>&1; then
             printf '%s\n' 'Install python3-pymssql from Kali APT, or Microsoft ODBC sqlcmd (mssql-tools18).' >&2
             return 4
         fi
+        tls_args=(-N)
+        if [[ "$skip_verify" == true ]]; then tls_args+=(-C); fi
         env -u SQLCMDPASSWORD -u SQLCMDINI sqlcmd -S "tcp:$host,$port" -d master \
-            -U "$user" -N -b -l 10 -t 30 -Q "$query"
+            -U "$user" "${tls_args[@]}" -b -l 10 -t 30 -Q "$query"
         return $?
     fi
 
@@ -176,12 +178,20 @@ from getpass import getpass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-host, port, user, query = sys.argv[1:]
+host, port, user, query, skip_verify = sys.argv[1:]
 ca_file = os.environ.get("FATHOMTRACE_DB_CA_FILE", "system")
-if ca_file != "system":
+if skip_verify != "true" and ca_file != "system":
     ca_file = str(Path(ca_file).resolve())
     if any(character in ca_file for character in "\r\n;#") or not Path(ca_file).is_file():
         sys.exit("Invalid database CA bundle path.")
+
+certificate_settings = "check certificate hostname = no\n"
+if skip_verify != "true":
+    certificate_settings = (
+        f"ca file = {ca_file}\n"
+        "check certificate hostname = yes\n"
+        f"certificate hostname = {host}\n"
+    )
 
 with TemporaryDirectory(prefix="fathomtrace-db-") as directory:
     config = Path(directory) / "freetds.conf"
@@ -191,9 +201,7 @@ with TemporaryDirectory(prefix="fathomtrace-db-") as directory:
         f"port = {port}\n"
         "tds version = 7.4\n"
         "encryption = require\n"
-        f"ca file = {ca_file}\n"
-        "check certificate hostname = yes\n"
-        f"certificate hostname = {host}\n",
+        + certificate_settings,
         encoding="utf-8",
     )
     for variable in ("TDSHOST", "TDSPORT", "TDSVER", "TDSENCRYPTION", "TDSDUMP", "TDSDUMPCONFIG"):
@@ -222,6 +230,14 @@ with TemporaryDirectory(prefix="fathomtrace-db-") as directory:
                 if not cursor.nextset():
                     break
     except pymssql.Error as error:
+        if skip_verify != "true" and error.args and error.args[0] == 20002:
+            print(
+                f"FreeTDS could not establish a connection to {host}:{port}. "
+                f"TLS certificate verification uses {host} as the expected identity. "
+                "Check listener reachability, the certificate name, and the trusted CA "
+                "(FATHOMTRACE_DB_CA_FILE). SQL login status is unknown.",
+                file=sys.stderr,
+            )
         sys.exit(f"SQL Server inventory failed: {error}")
 PYTHON
 }
