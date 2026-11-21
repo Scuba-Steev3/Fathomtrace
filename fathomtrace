@@ -6253,10 +6253,25 @@ if [[ "$HAS_MSSQL" == "true" && "$ENABLE_MSSQL_ENUM" == "true" ]]; then
         echo -e "           ${GREEN}$tool mssql \"$TARGET_IPV4\" -u '' -p ''${RESET}"
         record_command_argv "MSSQL" "Null-login validation" "$tool" mssql "$TARGET_IPV4" -u '' -p ''
 
-        MSSQL_ENUM_OUTPUT=$($tool mssql "$TARGET_IPV4" -u '' -p '' 2>&1)
+        mssql_probe_rc=0
+        MSSQL_ENUM_OUTPUT=$($tool mssql "$TARGET_IPV4" -u '' -p '' 2>&1) || mssql_probe_rc=$?
         echo "$MSSQL_ENUM_OUTPUT" | tee "mssql_nullenum_${TARGET_IPV4}_${DATE_TAG}.txt"
 
-        if echo "$MSSQL_ENUM_OUTPUT" | grep -qP "\[\+\]"; then
+        if [[ "$MSSQL_ENUM_OUTPUT" == *"Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'"* ]]; then
+            info "MSSQL reachable; anonymous login denied."
+            sps_record_finding "MSSQL-ANONYMOUS-DENIED" "informational" "high" \
+                "SQL Server explicitly rejected anonymous login on TCP/1433." \
+                "SQL Server responded" "" "discovery" "" "" ""
+            sps_refresh_service_states
+            info "Recon summary for $TARGET_IPV4 (later active checks skipped)"
+            info "Open TCP ports: ${OPEN_PORTS[*]}"
+            info "SMB access confirmed: $SMB_ACCESS_CONFIRMED"
+            info "MSSQL anonymous access: denied"
+            exit 0
+        elif ((mssql_probe_rc != 0)); then
+            error "MSSQL probe failed with exit code $mssql_probe_rc"
+            exit "$mssql_probe_rc"
+        elif echo "$MSSQL_ENUM_OUTPUT" | grep -qP "\[\+\]"; then
             critical "MSSQL allows NULL login!"
             MSSQL_NULL_LOGIN=true
         elif echo "$MSSQL_ENUM_OUTPUT" | grep -qP "\[-\]"; then
