@@ -5421,6 +5421,11 @@ if [[ "$DRY_RUN" == true ]]; then
     exit 0
 fi
 
+if ! sps_load_sshole_inventory "$SSHOLE_EVIDENCE_FILE"; then
+    SPS_SSHOLE_INVENTORY=()
+    warn "SSHole inventory is invalid or targets a different IPv4 endpoint. Continuing with service evidence."
+fi
+
 init_artifacts
 INVOCATION="bash"
 for invocation_arg in "$0" "${ORIGINAL_ARGS[@]}"; do
@@ -5469,6 +5474,7 @@ if [ "$ENABLE_SERVICE_DETECT" = true ]; then
     service_version_detection "$TARGET_IPV4" || true
     sps_udp_service_version_detection "$TARGET_IPV4" || true
 fi
+sps_finish_sshole_assessment
 
 # --------- NetBIOS Name Service Detection (UDP/137) ----------
 sps_run_netbios_scan "$TARGET_IPV4" || true
@@ -7067,6 +7073,12 @@ generate_synopsis() {
     success "Loot index saved to: ${BYELLOW}$LOOT_INDEX_FILE${RESET}"
     
     local found_any=false
+    local sshole_port sshole_status
+    for sshole_port in "${SPS_SSHOLE_REPORTED_PORTS[@]}"; do
+        sshole_status="${SPS_OPENSSH_ADVISORY_PORTS[$sshole_port]}"
+        note "SSHole assessment on TCP/$sshole_port: $sshole_status"
+        [[ "$sshole_status" == VULNERABLE ]] && found_any=true
+    done
 
     # Helper function to print item if true
     print_item() {

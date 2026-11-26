@@ -74,17 +74,17 @@ fi
 
 run_cli version --version
 assert_eq 0 "$CLI_RC" "version exits successfully"
-assert_contains "$CLI_STDOUT" "fathomtrace 2.1.4" "version is stable"
+assert_contains "$CLI_STDOUT" "fathomtrace 2.1.5" "version is stable"
 
 "$LEGACY_SCRIPT" --version > "$TEST_TMP/legacy.stdout" 2> "$TEST_TMP/legacy.stderr"
 assert_eq 0 "$?" "legacy command wrapper exits successfully"
-assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.4" "legacy command wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.5" "legacy command wrapper delegates to Fathomtrace"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix" --no-legacy-wrapper > "$TEST_TMP/install.stdout" 2> "$TEST_TMP/install.stderr"
 assert_eq 0 "$?" "prefix installer exits successfully"
 "$TEST_TMP/install-prefix/bin/fathomtrace" --version > "$TEST_TMP/installed.stdout" 2> "$TEST_TMP/installed.stderr"
 assert_eq 0 "$?" "installed prefix layout resolves libraries"
-assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.4" "installed command reports the Fathomtrace version"
+assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.5" "installed command reports the Fathomtrace version"
 assert_no_file "$TEST_TMP/install-prefix/bin/bash_simpleportscan.sh" "installer can omit the legacy wrapper"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix-legacy" > "$TEST_TMP/install-legacy.stdout" 2> "$TEST_TMP/install-legacy.stderr"
@@ -92,7 +92,7 @@ assert_eq 0 "$?" "default installer exits successfully"
 assert_file "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" "default installer includes the legacy wrapper"
 "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" --version > "$TEST_TMP/installed-legacy.stdout" 2> "$TEST_TMP/installed-legacy.stderr"
 assert_eq 0 "$?" "installed legacy wrapper exits successfully"
-assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.4" "installed legacy wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.5" "installed legacy wrapper delegates to Fathomtrace"
 
 run_cli unknown --definitely-unknown
 assert_eq 2 "$CLI_RC" "unknown option uses CLI exit code"
@@ -119,12 +119,12 @@ assert_contains "$TEST_TMP/explicit-jobs.txt" "37:true" "explicit --jobs is trac
     TARGET="" AUTH_USER="" AUTH_PASS=""
     source "$ROOT_DIR/lib/fathomtrace/cli.sh"
     sps_cli_defaults
-    sps_parse_args scan 192.0.2.143 -u robin -p robin --imap-dump \
-        --imap-mailbox DEV.DEPARTMENT.INT --imap-max-messages 10
+    sps_parse_args scan 192.0.2.143 -u robin -p fixture-imap-input --imap-dump \
+        --imap-mailbox EXAMPLE.MAILBOX.INT --imap-max-messages 10
     printf '%s|%s|%s|%s|%s\n' "$AUTH_USER" "$ENABLE_IMAP_ENUM" "$ENABLE_IMAP_DUMP" \
         "$IMAP_MAILBOX" "$IMAP_MAX_MESSAGES"
 ) > "$TEST_TMP/imap-cli-options"
-assert_eq "robin|true|true|DEV.DEPARTMENT.INT|10" "$(cat "$TEST_TMP/imap-cli-options")" "IMAP dump options parse with short credential flags"
+assert_eq "robin|true|true|EXAMPLE.MAILBOX.INT|10" "$(cat "$TEST_TMP/imap-cli-options")" "IMAP dump options parse with short credential flags"
 
 (
     TARGET="" AUTH_USER="" AUTH_PASS=""
@@ -139,7 +139,7 @@ assert_eq "2" "$(cat "$TEST_TMP/imap-cli-missing-creds")" "IMAP enumeration requ
     TARGET="" AUTH_USER="" AUTH_PASS=""
     source "$ROOT_DIR/lib/fathomtrace/cli.sh"
     sps_cli_defaults
-    sps_parse_args scan 192.0.2.143 -u robin -p robin --imap-dump --no-loot > /dev/null 2>&1
+    sps_parse_args scan 192.0.2.143 -u robin -p fixture-imap-input --imap-dump --no-loot > /dev/null 2>&1
     printf '%s\n' "$?"
 ) > "$TEST_TMP/imap-cli-no-loot"
 assert_eq "2" "$(cat "$TEST_TMP/imap-cli-no-loot")" "IMAP message dumping requires persistent protected artifacts"
@@ -243,11 +243,12 @@ EOF
 (
     source "$ROOT_DIR/lib/fathomtrace/scan.sh"
     warn() { printf '%s\n' "$*"; }
+    note() { :; }
     sps_record_finding() { printf '%s\n' "$1|$2|$3|$6|$8" >> "$TEST_TMP/openssh-findings.txt"; }
     sps_report_openssh_advisory "$TEST_TMP/openssh-services.txt"
 ) > "$TEST_TMP/openssh-advisory.txt"
-assert_contains "$TEST_TMP/openssh-advisory.txt" "Potential exposure to CVE-2026-123158" "SSH advisory is reported as potential exposure"
-assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-22|high|low|Linux with musl libc and PAM disabled" "SSH advisory records its unverified platform prerequisite"
+assert_contains "$TEST_TMP/openssh-advisory.txt" "POTENTIALLY_VULNERABLE" "SSH advisory is reported as potential exposure"
+assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-22|high|low|Host-side package, libc, PAM" "SSH advisory records its unverified platform prerequisite"
 assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-2222|high|low" "SSH advisory supports nonstandard ports and vendor suffixes"
 assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-2223|high|low" "SSH advisory covers earlier upstream versions"
 assert_eq 3 "$(awk 'END {print NR}' "$TEST_TMP/openssh-findings.txt")" "SSH advisory excludes fixed versions and inconclusive service rows"
@@ -256,6 +257,7 @@ assert_eq 3 "$(awk 'END {print NR}' "$TEST_TMP/openssh-findings.txt")" "SSH advi
     source "$ROOT_DIR/lib/fathomtrace/scan.sh"
     info() { printf '%s\n' "$*"; }
     warn() { printf '%s\n' "$*"; }
+    note() { :; }
     sps_record_finding() { printf '%s\n' "$1"; }
     timeout() { printf '%s\r\n' "$SSH_TEST_RESPONSE"; }
     SKIP_PREFLIGHT=true
@@ -276,6 +278,62 @@ assert_eq 1 "$(grep -Fxc 'CVE-2026-123158-TCP-22' "$TEST_TMP/ssh-banner.txt")" '
 assert_contains "$TEST_TMP/ssh-banner.txt" 'rejected non-SSH response' 'SSH banner ignores unrelated services on TCP/22'
 assert_contains "$TEST_TMP/ssh-banner.txt" 'ssh-confirmed=false' 'unrelated service does not confirm SSH'
 
+cat > "$TEST_TMP/sshole-inventory.txt" <<EOF
+target=192.0.2.1
+port=2222
+observed_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+context=assessment-network-managed-accounts
+alpine_branch=3.24
+package_version=10.3_p1-r1
+running_package=verified
+libc=musl
+pam=disabled
+password_auth=enabled
+account_conditions=present
+EOF
+(
+    source "$ROOT_DIR/lib/fathomtrace/scan.sh"
+    info() { printf '%s\n' "$*"; }
+    warn() { printf '%s\n' "$*"; }
+    note() { :; }
+    sps_record_finding() { printf 'finding=%s status=%s confidence=%s\n' "$1" "${11}" "$3"; }
+    TARGET_IPV4=192.0.2.1
+    sps_load_sshole_inventory "$TEST_TMP/sshole-inventory.txt" || exit 1
+    sps_report_openssh_version 22 10.6 'SSH banner'
+    sps_report_openssh_version 2222 10.3p1 Nmap
+    unset 'SPS_OPENSSH_ADVISORY_PORTS[2222]'
+    SPS_SSHOLE_INVENTORY[account_conditions]=unknown
+    sps_report_openssh_version 2222 10.3p1 Nmap
+    unset 'SPS_OPENSSH_ADVISORY_PORTS[2222]'
+    SPS_SSHOLE_INVENTORY[package_version]=10.3_p1-r2
+    sps_report_openssh_version 2222 10.3p1 Nmap
+    unset 'SPS_OPENSSH_ADVISORY_PORTS[2222]'
+    sps_report_openssh_version 2222 10.6p2 Nmap
+    unset 'SPS_OPENSSH_ADVISORY_PORTS[2222]'
+    sed 's/^observed_at=.*/observed_at=2020-01-01T00:00:00Z/' \
+        "$TEST_TMP/sshole-inventory.txt" > "$TEST_TMP/sshole-stale.txt"
+    sps_load_sshole_inventory "$TEST_TMP/sshole-stale.txt" || exit 1
+    sps_report_openssh_version 2222 10.3p1 Nmap
+    unset 'SPS_OPENSSH_ADVISORY_PORTS[2222]'
+    sps_finish_sshole_assessment
+    printf 'edge=%s\n' "$(sps_sshole_alpine_patch_status edge 10.6_p2-r0)"
+    printf 'alpine_322_old=%s\n' "$(sps_sshole_alpine_patch_status 3.22 10.0_p1-r9)"
+    printf 'alpine_322_fixed=%s\n' "$(sps_sshole_alpine_patch_status 3.22 10.0_p1-r11)"
+    TARGET_IPV4=192.0.2.2
+    sps_load_sshole_inventory "$TEST_TMP/sshole-inventory.txt" || printf 'rejected mismatched target\n'
+) > "$TEST_TMP/sshole-verdicts.txt"
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-22 status=POTENTIALLY_VULNERABLE confidence=low' 'evidence cannot confirm another SSH port'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-2222 status=VULNERABLE confidence=high' 'matching inventory confirms exposure on an alternate port'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-2222 status=LIKELY_VULNERABLE confidence=medium' 'unknown account conditions keep confirmation incomplete'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-2222 status=NOT_AFFECTED confidence=high' 'Alpine backport overrides the upstream-looking banner'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-2222 status=INCONCLUSIVE confidence=low' 'conflicting banner and package evidence is inconclusive'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'outside the 24-hour window' 'stale inventory is inconclusive'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'TCP-2222 status=SKIPPED confidence=low' 'assessment is skipped without matching SSH evidence'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'edge=patched' 'Alpine edge treats the upstream fixed version as patched'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'alpine_322_old=unpatched' 'Alpine revisions compare numerically below the backport'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'alpine_322_fixed=patched' 'Alpine revisions compare numerically at the backport boundary'
+assert_contains "$TEST_TMP/sshole-verdicts.txt" 'rejected mismatched target' 'host inventory is bound to the resolved IPv4 endpoint'
+
 assert_contains "$SCRIPT" 'for bh_tool in bloodhound-ce-python bloodhound-python; do' "BloodHound CE collector is preferred with legacy fallback"
 assert_contains "$SCRIPT" 'bh_collection="All"' "BloodHound CE uses the All collection method"
 assert_contains "$SCRIPT" '-c "$bh_collection" --zip' "BloodHound collector receives its selected collection method"
@@ -284,18 +342,18 @@ assert_contains "$ROOT_DIR/lib/fathomtrace/validation.sh" 'sps_optional_tool_che
 (
     source "$ROOT_DIR/lib/fathomtrace/smb.sh"
     args=()
-    sps_build_netexec_smb_auth_args args hodor hodor NORTH
+    sps_build_netexec_smb_auth_args args example-user fixture-smb-input NORTH
     (IFS='|'; printf '%s\n' "${args[*]}")
 ) > "$TEST_TMP/netexec-smb-domain-args.txt"
-assert_contains "$TEST_TMP/netexec-smb-domain-args.txt" "-u|hodor|-p|hodor|-d|NORTH" "NetExec SMB authentication passes the supplied domain"
+assert_contains "$TEST_TMP/netexec-smb-domain-args.txt" "-u|example-user|-p|fixture-smb-input|-d|NORTH" "NetExec SMB authentication passes the supplied domain"
 
 (
     source "$ROOT_DIR/lib/fathomtrace/smb.sh"
     args=()
-    sps_build_netexec_smb_auth_args args hodor hodor ""
+    sps_build_netexec_smb_auth_args args example-user fixture-smb-input ""
     (IFS='|'; printf '%s\n' "${args[*]}")
 ) > "$TEST_TMP/netexec-smb-no-domain-args.txt"
-assert_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-u|hodor|-p|hodor" "NetExec SMB authentication works without a domain"
+assert_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-u|example-user|-p|fixture-smb-input" "NetExec SMB authentication works without a domain"
 assert_not_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-d" "NetExec SMB authentication omits an empty domain"
 
 (
@@ -342,12 +400,12 @@ assert_contains "$TEST_TMP/nonfatal-kerberos-auth.txt" "first=0 second=0 attempt
 
 (
     source "$ROOT_DIR/lib/fathomtrace/smb.sh"
-    cme_output='SMB         192.168.78.11   445    WINTERFELL       [-] Error enumerating domain users using dc ip 192.168.78.11: NTLM needs domain\username and a password
-SMB         192.168.78.11   445    WINTERFELL       [*] Trying with SAMRPC protocol
-SMB         192.168.78.11   445    WINTERFELL       [+] Enumerated domain user(s)
-SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\Guest                          Built-in account for guest access to the computer/domain
-SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\arya.stark                     Arya Stark
-SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\sansa.stark                    Sansa Stark'
+    cme_output='SMB         192.0.2.11   445    EXAMPLE-DC01       [-] Error enumerating domain users using dc ip 192.0.2.11: NTLM needs domain\username and a password
+SMB         192.0.2.11   445    EXAMPLE-DC01       [*] Trying with SAMRPC protocol
+SMB         192.0.2.11   445    EXAMPLE-DC01       [+] Enumerated domain user(s)
+SMB         192.0.2.11   445    EXAMPLE-DC01       lab.example.test\Guest                          Built-in account for guest access to the computer/domain
+SMB         192.0.2.11   445    EXAMPLE-DC01       lab.example.test\example.user1                     Example User One
+SMB         192.0.2.11   445    EXAMPLE-DC01       lab.example.test\example.user2                    Example User Two'
     parsed_users="$(sps_parse_cme_users <<< "$cme_output")"
     printf 'outcome=%s\n%s\n' \
         "$(sps_classify_cme_user_enum "$cme_output" 1 "$parsed_users")" \
@@ -355,7 +413,7 @@ SMB         192.168.78.11   445    WINTERFELL       north.sevenkingdoms.local\sa
 ) > "$TEST_TMP/cme-samrpc-fallback.txt"
 assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "outcome=enumerated" "CME SAMRPC fallback overrides the initial domain-enumeration error"
 assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "Guest|Built-in account" "CME parser preserves Guest as an enumerated account"
-assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "arya.stark|Arya Stark" "CME parser preserves enumerated domain users"
+assert_contains "$TEST_TMP/cme-samrpc-fallback.txt" "example.user1|Example User One" "CME parser preserves enumerated domain users"
 assert_not_contains "$TEST_TMP/cme-samrpc-fallback.txt" "username|" "CME parser ignores NTLM domain\\username guidance"
 assert_contains "$SCRIPT" "local dc_2025=false" "BadSuccessor evaluation initializes its Server 2025 state under nounset"
 assert_contains "$SCRIPT" '"${dc_2025:-false}" == true' "BadSuccessor evaluation defensively reads its Server 2025 state"
@@ -366,36 +424,36 @@ assert_contains "$SCRIPT" "--format=krb5asrep asrep_hashes_\$TARGET_IPV4.txt" "A
 (
     source "$ROOT_DIR/lib/fathomtrace/ldap.sh"
     sps_parse_netexec_dc_os <<'EOF'
-LDAP                     192.168.78.11   389    WINTERFELL       [+] Response for object: CN=WINTERFELL,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local
-LDAP                     192.168.78.11   389    WINTERFELL       operatingSystem      Windows Server 2019 Datacenter Evaluation
-LDAP                     192.168.78.11   389    WINTERFELL       operatingSystemVersion 10.0 (17763)
-LDAP                     192.168.78.11   389    WINTERFELL       dNSHostName          winterfell.north.sevenkingdoms.local
-LDAP                     192.168.78.12   389    CASTLEBLACK      [+] Response for object: CN=CASTLEBLACK,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local
-LDAP                     192.168.78.12   389    CASTLEBLACK      dNSHostName          castleblack.north.sevenkingdoms.local
-LDAP                     192.168.78.12   389    CASTLEBLACK      operatingSystemVersion 10.0 (26100)
-LDAP                     192.168.78.12   389    CASTLEBLACK      operatingSystem      Windows Server 2025 Datacenter
+LDAP                     192.0.2.11   389    EXAMPLE-DC01       [+] Response for object: CN=EXAMPLE-DC01,OU=Domain Controllers,DC=lab,DC=example,DC=test
+LDAP                     192.0.2.11   389    EXAMPLE-DC01       operatingSystem      Windows Server 2019 Datacenter Evaluation
+LDAP                     192.0.2.11   389    EXAMPLE-DC01       operatingSystemVersion 10.0 (17763)
+LDAP                     192.0.2.11   389    EXAMPLE-DC01       dNSHostName          example-dc01.lab.example.test
+LDAP                     192.0.2.12   389    EXAMPLE-DC02      [+] Response for object: CN=EXAMPLE-DC02,OU=Domain Controllers,DC=lab,DC=example,DC=test
+LDAP                     192.0.2.12   389    EXAMPLE-DC02      dNSHostName          example-dc02.lab.example.test
+LDAP                     192.0.2.12   389    EXAMPLE-DC02      operatingSystemVersion 10.0 (26100)
+LDAP                     192.0.2.12   389    EXAMPLE-DC02      operatingSystem      Windows Server 2025 Datacenter
 EOF
 ) > "$TEST_TMP/netexec-dc-os.txt"
-assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=WINTERFELL,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|winterfell.north.sevenkingdoms.local|Windows Server 2019 Datacenter Evaluation|10.0 (17763)" "NetExec parser extracts the Server 2019 DC record"
-assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=CASTLEBLACK,OU=Domain Controllers,DC=north,DC=sevenkingdoms,DC=local|castleblack.north.sevenkingdoms.local|Windows Server 2025 Datacenter|10.0 (26100)" "NetExec parser handles arbitrary LDAP attribute order and multiple DCs"
+assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=EXAMPLE-DC01,OU=Domain Controllers,DC=lab,DC=example,DC=test|example-dc01.lab.example.test|Windows Server 2019 Datacenter Evaluation|10.0 (17763)" "NetExec parser extracts the Server 2019 DC record"
+assert_contains "$TEST_TMP/netexec-dc-os.txt" "CN=EXAMPLE-DC02,OU=Domain Controllers,DC=lab,DC=example,DC=test|example-dc02.lab.example.test|Windows Server 2025 Datacenter|10.0 (26100)" "NetExec parser handles arbitrary LDAP attribute order and multiple DCs"
 assert_not_contains "$TEST_TMP/netexec-dc-os.txt" "Windows Server 2019 Datacenter Evaluation|Windows Server 2019 Datacenter Evaluation" "NetExec parser does not confuse operatingSystem with operatingSystemVersion"
 
 (
     source "$ROOT_DIR/lib/fathomtrace/ad_acl.sh"
     sps_parse_bloodyad_writeowner <<'EOF'
-distinguishedName: CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=north,DC=sevenkingdoms,DC=local
+distinguishedName: CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=lab,DC=example,DC=test
 OWNER: WRITE
-description: Stark Wallpaper Policy
+description: Example Wallpaper Policy
 
-distinguishedName: CN=Unrelated,CN=Users,DC=north,DC=sevenkingdoms,DC=local
+distinguishedName: CN=Unrelated,CN=Users,DC=lab,DC=example,DC=test
 DACL: WRITE
 
-distinguishedName: OU=Workstations,DC=north,DC=sevenkingdoms,DC=local
+distinguishedName: OU=Workstations,DC=lab,DC=example,DC=test
 Right: WRITE_OWNER
 EOF
 ) > "$TEST_TMP/writeowner-findings.txt"
-assert_contains "$TEST_TMP/writeowner-findings.txt" "CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=north,DC=sevenkingdoms,DC=local|GPO|WriteOwner" "WriteOwner parser detects an arbitrary writable GPO"
-assert_contains "$TEST_TMP/writeowner-findings.txt" "OU=Workstations,DC=north,DC=sevenkingdoms,DC=local|OU|WriteOwner" "WriteOwner parser accepts explicit ACL right names"
+assert_contains "$TEST_TMP/writeowner-findings.txt" "CN={8E9B87DA-1111-2222-3333-444444444444},CN=Policies,CN=System,DC=lab,DC=example,DC=test|GPO|WriteOwner" "WriteOwner parser detects an arbitrary writable GPO"
+assert_contains "$TEST_TMP/writeowner-findings.txt" "OU=Workstations,DC=lab,DC=example,DC=test|OU|WriteOwner" "WriteOwner parser accepts explicit ACL right names"
 assert_not_contains "$TEST_TMP/writeowner-findings.txt" "CN=Unrelated" "WriteOwner parser does not promote DACL-only findings"
 assert_contains "$SCRIPT" "AD-ACL-WRITEOWNER" "WriteOwner findings are recorded in the structured report"
 assert_contains "$SCRIPT" "Active Directory WriteOwner permission abuse candidate" "WriteOwner findings feed the attack-path report"
@@ -435,14 +493,14 @@ assert_not_contains "$CLI_STDOUT" "enable_cmdshell" "MSSQL enumeration does not 
 run_cli mssql-explicit-actions 127.0.0.1 --dry-run --no-loot --skip-preflight --mssql-privesc --mssql-enable-cmdshell --ports 1433
 assert_eq 0 "$CLI_RC" "explicit MSSQL action flags are accepted"
 
-run_cli json 127.0.0.1 --dry-run --no-loot --skip-preflight --format json --ports 22,80 --user analyst --pass topsecret
+run_cli json 127.0.0.1 --dry-run --no-loot --skip-preflight --format json --ports 22,80 --user analyst --pass fixture-redaction-marker
 assert_eq 0 "$CLI_RC" "JSON dry run succeeds"
 assert_contains "$CLI_STDOUT" '"schema_version":"1.0"' "JSON schema version is present"
 assert_contains "$CLI_STDOUT" '"open_ports":[]' "JSON open-port field is stable"
 assert_not_contains "$CLI_STDOUT" "Legend" "JSON stdout has no legend"
 assert_not_contains "$CLI_STDOUT" $'\033[' "JSON stdout has no ANSI sequences"
-assert_not_contains "$CLI_STDOUT" "topsecret" "JSON stdout redacts passwords"
-assert_not_contains "$CLI_STDERR" "topsecret" "JSON diagnostics redact passwords"
+assert_not_contains "$CLI_STDOUT" "fixture-redaction-marker" "JSON stdout redacts passwords"
+assert_not_contains "$CLI_STDERR" "fixture-redaction-marker" "JSON diagnostics redact passwords"
 
 run_cli csv 127.0.0.1 --dry-run --no-loot --skip-preflight --format csv --ports 443
 assert_eq 0 "$CLI_RC" "CSV dry run succeeds"
@@ -452,7 +510,7 @@ assert_not_contains "$CLI_STDOUT" "Authorized Recon" "CSV stdout has no banner"
 run_cli no-color 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --ascii --ports 80
 assert_eq 0 "$CLI_RC" "no-color dry run succeeds"
 assert_not_contains "$CLI_STDOUT" $'\033[' "no-color removes ANSI sequences"
-assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.4" "text startup banner includes the application version"
+assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.5" "text startup banner includes the application version"
 assert_contains "$CLI_STDOUT" "[*] Validating target" "ASCII information icon is used"
 
 run_cli force-color 127.0.0.1 --dry-run --no-loot --skip-preflight --color always --ascii --ports 80
@@ -467,9 +525,9 @@ NO_COLOR=1 "$SCRIPT" 127.0.0.1 --dry-run --no-loot --skip-preflight --ascii --po
 assert_eq 0 "$?" "NO_COLOR dry run succeeds"
 assert_not_contains "$TEST_TMP/no-color-env.stdout" $'\033[' "NO_COLOR disables ANSI colors"
 
-run_cli show-secrets 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --user analyst --pass topsecret --show-secrets --ports 80
+run_cli show-secrets 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --user analyst --pass fixture-redaction-marker --show-secrets --ports 80
 assert_eq 0 "$CLI_RC" "show-secrets dry run succeeds"
-assert_contains "$CLI_STDOUT" "Password:  topsecret" "--show-secrets prints the supplied password"
+assert_contains "$CLI_STDOUT" "Password:  fixture-redaction-marker" "--show-secrets prints the supplied password"
 
 run_cli unicode 127.0.0.1 --dry-run --no-loot --skip-preflight --unicode --ports 80
 assert_eq 0 "$CLI_RC" "Unicode dry run succeeds"
@@ -783,7 +841,7 @@ assert_contains "$TEST_TMP/imap-connection-help" "Do not submit authentication c
     source "$ROOT_DIR/lib/fathomtrace/validation.sh"
     source "$ROOT_DIR/lib/fathomtrace/imap.sh"
     OUTPUT_FORMAT=text QUIET=true DEBUG=false VERBOSE=false COLOR_MODE=never ICON_MODE=ascii
-    AUTH_USER="alice" AUTH_PASS="supersecret" CREDS_PROVIDED=true
+    AUTH_USER="alice" AUTH_PASS="fixture-imap-marker" CREDS_PROVIDED=true
     AUTH_DOMAIN="" SMB_PASS="" SHOW_SECRETS=true
     TARGET_FQDN="" ORIGINAL_TARGET="192.0.2.143"
     IMAP_IMPLICIT_TLS_AVAILABLE=true IMAP_STARTTLS_AVAILABLE=true
@@ -800,7 +858,7 @@ assert_contains "$TEST_TMP/imap-connection-help" "Do not submit authentication c
         printf '%s\n' \
             'S: * OK IMAP ready' \
             'C: a001 LOGIN "alice" "[REDACTED]"' \
-            'S: * OK diagnostic accidentally echoed supersecret' \
+            'S: * OK diagnostic accidentally echoed fixture-imap-marker' \
             'S: a001 OK Logged in' \
             'C: a002 LOGOUT' \
             'S: a002 OK Logout completed'
@@ -813,11 +871,11 @@ assert_contains "$TEST_TMP/imap-connection-help" "Do not submit authentication c
     sps_imap_auth_success_text > "$TEST_TMP/imap-auth-success-text"
 )
 assert_contains "$TEST_TMP/imap-auth-state" "success|true|IMAP accepted the supplied credentials" "IMAP auth classifies a tagged OK response as success"
-assert_contains "$TEST_TMP/imap-auth-session-args" "192.0.2.143 993 implicit alice supersecret imap.example.test" "IMAP auth prefers one implicit-TLS attempt on port 993"
+assert_contains "$TEST_TMP/imap-auth-session-args" "192.0.2.143 993 implicit alice fixture-imap-marker imap.example.test" "IMAP auth prefers one implicit-TLS attempt on port 993"
 assert_contains "$TEST_TMP/imap-auth-command" "openssl s_client -quiet -crlf -connect 192.0.2.143:993 -servername imap.example.test" "IMAP auth records a password-free OpenSSL command"
-assert_not_contains "$TEST_TMP/imap-auth-command" "supersecret" "IMAP auth command records never contain the password"
+assert_not_contains "$TEST_TMP/imap-auth-command" "fixture-imap-marker" "IMAP auth command records never contain the password"
 assert_contains "$TEST_TMP/imap_auth_192.0.2.143_993.txt" "[REDACTED]" "IMAP auth transcript contains a redaction marker"
-assert_not_contains "$TEST_TMP/imap_auth_192.0.2.143_993.txt" "supersecret" "IMAP auth transcript forcibly removes the password even with show-secrets"
+assert_not_contains "$TEST_TMP/imap_auth_192.0.2.143_993.txt" "fixture-imap-marker" "IMAP auth transcript forcibly removes the password even with show-secrets"
 assert_contains "$TEST_TMP/imap-auth-finding" "IMAP-AUTHENTICATION" "successful IMAP auth records a structured finding"
 assert_contains "$TEST_TMP/imap-auth-module-status" "imap-auth:executed:IMAP accepted" "successful IMAP auth records module status"
 assert_eq "IMAP credentials accepted for alice on port 993" "$(cat "$TEST_TMP/imap-auth-success-text")" "IMAP success message preserves user and accepted port for final reports"
@@ -831,7 +889,7 @@ assert_contains "$SCRIPT" "AUTHENTICATED MAIL ACCESS" "attack-path report gives 
     source "$ROOT_DIR/lib/fathomtrace/validation.sh"
     source "$ROOT_DIR/lib/fathomtrace/imap.sh"
     OUTPUT_FORMAT=text QUIET=true DEBUG=false VERBOSE=false COLOR_MODE=never ICON_MODE=ascii
-    AUTH_USER="alice" AUTH_PASS="supersecret" CREDS_PROVIDED=true AUTH_DOMAIN="" SMB_PASS=""
+    AUTH_USER="alice" AUTH_PASS="fixture-imap-marker" CREDS_PROVIDED=true AUTH_DOMAIN="" SMB_PASS=""
     IMAP_IMPLICIT_TLS_AVAILABLE=false IMAP_STARTTLS_AVAILABLE=false
     sps_configure_output
     sps_command_available() { return 0; }
@@ -849,8 +907,8 @@ assert_no_file "$TEST_TMP/imap-auth-cleartext-attempted" "IMAP auth never submit
     source "$ROOT_DIR/lib/fathomtrace/validation.sh"
     source "$ROOT_DIR/lib/fathomtrace/imap.sh"
     OUTPUT_FORMAT=text QUIET=true DEBUG=false VERBOSE=false COLOR_MODE=never ICON_MODE=ascii
-    AUTH_USER="robin" AUTH_PASS="robin" CREDS_PROVIDED=true AUTH_DOMAIN="" SMB_PASS=""
-    ENABLE_IMAP_ENUM=true ENABLE_IMAP_DUMP=true IMAP_MAILBOX="DEV.DEPARTMENT.INT" IMAP_MAX_MESSAGES=5
+    AUTH_USER="robin" AUTH_PASS="fixture-imap-input" CREDS_PROVIDED=true AUTH_DOMAIN="" SMB_PASS=""
+    ENABLE_IMAP_ENUM=true ENABLE_IMAP_DUMP=true IMAP_MAILBOX="EXAMPLE.MAILBOX.INT" IMAP_MAX_MESSAGES=5
     TARGET_FQDN="" ORIGINAL_TARGET="192.0.2.143"
     IMAP_IMPLICIT_TLS_AVAILABLE=true IMAP_STARTTLS_AVAILABLE=true
     IMAP_AUTH_HOSTNAME="dev.example.test"
@@ -873,12 +931,12 @@ S: a001 OK Logged in
 --- IMAP MAILBOX ENUMERATION ---
 C: a002 LIST "" "*"
 S: * LIST (\Noselect \HasChildren) "." DEV
-S: * LIST (\Noselect \HasChildren) "." DEV.DEPARTMENT
-S: * LIST (\HasNoChildren) "." DEV.DEPARTMENT.INT
+S: * LIST (\Noselect \HasChildren) "." EXAMPLE.MAILBOX
+S: * LIST (\HasNoChildren) "." EXAMPLE.MAILBOX.INT
 S: * LIST (\HasNoChildren) "." INBOX
 S: a002 OK List completed
---- IMAP READ-ONLY MESSAGE EXPORT: DEV.DEPARTMENT.INT ---
-C: a003 EXAMINE "DEV.DEPARTMENT.INT"
+--- IMAP READ-ONLY MESSAGE EXPORT: EXAMPLE.MAILBOX.INT ---
+C: a003 EXAMINE "EXAMPLE.MAILBOX.INT"
 S: * 1 EXISTS
 S: a003 OK [READ-ONLY] Examine completed
 C: a004 FETCH 1:1 (UID BODY.PEEK[])
@@ -888,8 +946,8 @@ S:
 S: Authorized test content
 S: )
 S: a004 OK Fetch completed
-I: mailbox "DEV.DEPARTMENT.INT" examined read-only (1 message(s))
-I: exported 1 message(s) from mailbox "DEV.DEPARTMENT.INT"
+I: mailbox "EXAMPLE.MAILBOX.INT" examined read-only (1 message(s))
+I: exported 1 message(s) from mailbox "EXAMPLE.MAILBOX.INT"
 I: IMAP dump completed: mailboxes examined=1; mailboxes failed=0; messages exported=1; limit=5
 C: a999 LOGOUT
 S: a999 OK Logout completed
@@ -902,14 +960,14 @@ EOF
         "$IMAP_DUMP_MESSAGES_EXPORTED" "$IMAP_DUMP_LOOT_PATH" \
         > "$TEST_TMP/imap-dump-state"
 )
-assert_contains "$TEST_TMP/imap-parsed/imap_mailboxes_192.0.2.143_993.txt" $'\\HasNoChildren\tDEV.DEPARTMENT.INT' "IMAP enumeration parses a nested mailbox"
+assert_contains "$TEST_TMP/imap-parsed/imap_mailboxes_192.0.2.143_993.txt" $'\\HasNoChildren\tEXAMPLE.MAILBOX.INT' "IMAP enumeration parses a nested mailbox"
 assert_contains "$TEST_TMP/imap-parsed/imap_mailboxes_192.0.2.143_993.txt" $'\\HasNoChildren\tINBOX' "IMAP enumeration parses INBOX"
-assert_contains "$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_DEV.DEPARTMENT.INT.txt" "Authorized test content" "IMAP dump stores message content in the protected loot path"
-assert_not_contains "$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_DEV.DEPARTMENT.INT.txt" 'C: a001 LOGIN "robin" "robin"' "IMAP dump never stores the supplied password"
+assert_contains "$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_EXAMPLE.MAILBOX.INT.txt" "Authorized test content" "IMAP dump stores message content in the protected loot path"
+assert_not_contains "$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_EXAMPLE.MAILBOX.INT.txt" 'C: a001 LOGIN "robin" "fixture-imap-input"' "IMAP dump never stores the supplied password"
 assert_contains "$TEST_TMP/imap-dump-findings" "IMAP-MESSAGE-EXPORT" "IMAP dump records a structured finding"
 assert_contains "$TEST_TMP/imap-dump-module-statuses" "imap-enum:executed:listed 4 mailbox(es)" "IMAP enumeration records module status"
-assert_contains "$TEST_TMP/imap-dump-module-statuses" "imap-dump:executed:preferred-mailbox=DEV.DEPARTMENT.INT; mailboxes examined=1" "IMAP dump records multi-mailbox module status"
-assert_contains "$TEST_TMP/imap-dump-state" "1|0|1|$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_DEV.DEPARTMENT.INT.txt" "IMAP dump exposes counts and the protected loot path to final reports"
+assert_contains "$TEST_TMP/imap-dump-module-statuses" "imap-dump:executed:preferred-mailbox=EXAMPLE.MAILBOX.INT; mailboxes examined=1" "IMAP dump records multi-mailbox module status"
+assert_contains "$TEST_TMP/imap-dump-state" "1|0|1|$TEST_TMP/imap-sensitive/imap_mail_dump_192.0.2.143_993_EXAMPLE.MAILBOX.INT.txt" "IMAP dump exposes counts and the protected loot path to final reports"
 assert_contains "$ROOT_DIR/lib/fathomtrace/imap.sh" "EXAMINE" "IMAP dump opens the mailbox read-only"
 assert_contains "$ROOT_DIR/lib/fathomtrace/imap.sh" "BODY.PEEK[]" "IMAP dump avoids setting the Seen flag"
 
@@ -966,15 +1024,15 @@ assert_contains "$SCRIPT" "if sps_imap_dump_has_exported_messages; then" "Attack
                 'a002 LIST "" "*"' )
                     printf '%s\r\n' \
                         '* LIST (\Noselect \HasChildren) "." DEV' \
-                        '* LIST (\Noselect \HasChildren) "." DEV.DEPARTMENT' \
-                        '* LIST (\HasNoChildren) "." DEV.DEPARTMENT.INT' \
+                        '* LIST (\Noselect \HasChildren) "." EXAMPLE.MAILBOX' \
+                        '* LIST (\HasNoChildren) "." EXAMPLE.MAILBOX.INT' \
                         '* LIST (\HasNoChildren) "." INBOX' \
                         'a002 OK List completed'
                     ;;
                 'a003 EXAMINE "INBOX"' )
                     printf '%s\r\n' '* 0 EXISTS' 'a003 OK [READ-ONLY] Examine completed'
                     ;;
-                'a004 EXAMINE "DEV.DEPARTMENT.INT"' )
+                'a004 EXAMINE "EXAMPLE.MAILBOX.INT"' )
                     printf '%s\r\n' '* 1 EXISTS' 'a004 OK [READ-ONLY] Examine completed'
                     ;;
                 'a005 FETCH 1:1 (UID BODY.PEEK[])' )
@@ -988,13 +1046,13 @@ assert_contains "$SCRIPT" "if sps_imap_dump_has_exported_messages; then" "Attack
         done
     }
 
-    sps_imap_login_session 192.0.2.143 993 implicit robin robin > "$TEST_TMP/imap-multi-mailbox-session"
+    sps_imap_login_session 192.0.2.143 993 implicit robin fixture-imap-input > "$TEST_TMP/imap-multi-mailbox-session"
 )
 assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'C: a003 EXAMINE "INBOX"' "IMAP dump examines the preferred mailbox first"
 assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'mailbox "INBOX" contains no messages; continuing' "IMAP dump continues after an empty preferred mailbox"
-assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'C: a004 EXAMINE "DEV.DEPARTMENT.INT"' "IMAP dump examines another selectable LIST mailbox"
+assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'C: a004 EXAMINE "EXAMPLE.MAILBOX.INT"' "IMAP dump examines another selectable LIST mailbox"
 assert_not_contains "$TEST_TMP/imap-multi-mailbox-session" 'EXAMINE "DEV"' "IMAP dump skips a top-level Noselect container"
-assert_not_contains "$TEST_TMP/imap-multi-mailbox-session" 'EXAMINE "DEV.DEPARTMENT"' "IMAP dump skips a nested Noselect container"
+assert_not_contains "$TEST_TMP/imap-multi-mailbox-session" 'EXAMINE "EXAMPLE.MAILBOX"' "IMAP dump skips a nested Noselect container"
 assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'C: a005 FETCH 1:1 (UID BODY.PEEK[])' "IMAP dump exports from a non-empty nested mailbox"
 assert_contains "$TEST_TMP/imap-multi-mailbox-session" 'IMAP dump completed: mailboxes examined=2; mailboxes failed=0; messages exported=1; limit=5' "IMAP dump summarizes all examined mailboxes"
 
@@ -1060,8 +1118,8 @@ assert_not_contains "$ROOT_DIR/lib/fathomtrace/mail.sh" "CAPA" "Telnet banner ca
     }
     sps_mail_certificate_is_valid() { return 0; }
     cat > "$TEST_TMP/certificate-description.fixture" <<'EOF'
-subject=emailAddress=cto.dev@dev.inlanefreight.htb,CN=dev.inlanefreight.htb,OU=DevOps Department,O=InlaneFreight Ltd,L=London,ST=London,C=UK
-issuer=CN=InlaneFreight Test CA,O=InlaneFreight Ltd,C=UK
+subject=emailAddress=fixture@service.example.test,CN=service.example.test,OU=DevOps Department,O=Example Organization,L=London,ST=London,C=UK
+issuer=CN=Example Test CA,O=Example Organization,C=UK
 notBefore=Nov  8 23:10:05 2021 GMT
 notAfter=Aug 23 23:10:05 2295 GMT
 serial=01AB
@@ -1082,9 +1140,9 @@ EOF
     sps_mail_parse_certificate_metadata "$TEST_TMP/certificate-san.fixture"
     printf '%s\n' "$MAIL_CERT_SANS" > "$TEST_TMP/certificate-sans"
 )
-assert_contains "$TEST_TMP/certificate-state" "cn=dev.inlanefreight.htb sans= hosts=dev.inlanefreight.htb" "certificate parser falls back to the subject CN when SAN is absent"
-assert_contains "$TEST_TMP/certificate-hosts" "192.0.2.143 dev.inlanefreight.htb" "certificate CN is added to host suggestions"
-assert_contains "$TEST_TMP/certificate-discovered" "dev.inlanefreight.htb" "certificate CN is added to discovered hosts"
+assert_contains "$TEST_TMP/certificate-state" "cn=service.example.test sans= hosts=service.example.test" "certificate parser falls back to the subject CN when SAN is absent"
+assert_contains "$TEST_TMP/certificate-hosts" "192.0.2.143 service.example.test" "certificate CN is added to host suggestions"
+assert_contains "$TEST_TMP/certificate-discovered" "service.example.test" "certificate CN is added to discovered hosts"
 assert_contains "$TEST_TMP/certificate-fetch-args" "imap starttls" "certificate capture selects IMAP STARTTLS"
 assert_contains "$TEST_TMP/certificate-command" "-starttls imap" "certificate capture records the STARTTLS command"
 assert_contains "$TEST_TMP/certificate-findings" "TLS-CERTIFICATE-IMAP-143" "certificate capture records a structured finding"
@@ -1200,7 +1258,7 @@ rdp_fake_netexec() {
     }
     RDP_FAKE_MODE=success RDP_ARG_LOG="$TEST_TMP/rdp-success.args"
     export RDP_FAKE_MODE RDP_ARG_LOG
-    RDP_PORT_OPEN=true CREDS_PROVIDED=true AUTH_USER=analyst AUTH_PASS=topsecret AUTH_DOMAIN=LAB LDAP_DOMAIN=""
+    RDP_PORT_OPEN=true CREDS_PROVIDED=true AUTH_USER=analyst AUTH_PASS=fixture-redaction-marker AUTH_DOMAIN=LAB LDAP_DOMAIN=""
     sps_run_rdp_auth_check 192.0.2.25
     printf '%s|%s|%s|%s\n' "$RDP_AUTH_STATUS" "$RDP_AUTH_OK" "$RDP_AUTH_PROVIDER" "$RDP_AUTH_REASON" > "$TEST_TMP/rdp-success.result"
 )
@@ -1255,22 +1313,22 @@ assert_no_file "$TEST_TMP/rdp-skipped.args" "skipped RDP validation does not inv
     source "$ROOT_DIR/lib/fathomtrace/validation.sh"
     source "$ROOT_DIR/lib/fathomtrace/loot.sh"
     OUTPUT_FORMAT=text QUIET=true DEBUG=false VERBOSE=false COLOR_MODE=never ICON_MODE=ascii
-    AUTH_PASS=topsecret SMB_PASS="" TARGET=127.0.0.1 TARGET_IPV4=127.0.0.1
+    AUTH_PASS=fixture-redaction-marker SMB_PASS="" TARGET=127.0.0.1 TARGET_IPV4=127.0.0.1
     LOOT_ENABLED=true LOOT_BASE_DIR="$TEST_TMP/loot-unit" OVERWRITE=false INDEX_FORMAT=all
     RUNTIME_TMP_DIR="$TEST_TMP/loot-runtime" SPS_SESSION_ID=unit-session
     mkdir -p "$RUNTIME_TMP_DIR"
     sps_configure_output
     printf 'same evidence\n' > "$TEST_TMP/source-one.txt"
     printf 'same evidence\n' > "$TEST_TMP/source-two.txt"
-    printf 'console secret: topsecret\n' > "$TEST_TMP/console.txt"
+    printf 'console secret: fixture-redaction-marker\n' > "$TEST_TMP/console.txt"
     MACHINE_CAPTURE_FILE="$TEST_TMP/console.txt"
     init_artifacts > /dev/null 2> /dev/null
     sps_store_artifact "$TEST_TMP/source-one.txt" web raw > "$TEST_TMP/first-path"
     sps_store_artifact "$TEST_TMP/source-two.txt" web raw > "$TEST_TMP/second-path"
-    record_command Test Redaction "tool --password topsecret"
+    record_command Test Redaction "tool --password fixture-redaction-marker"
     record_module_status optional-module failed "simulated partial failure"
     sps_record_finding "TEST-001" high confirmed "unit evidence" "one|two" "three" active-read "evidence/path" "fix it" "clean it"
-    printf 'user:topsecret\n' > credentials.txt
+    printf 'user:fixture-redaction-marker\n' > credentials.txt
     sps_finalize_artifacts
     sps_restore_working_directory
     sanitize_name '../../unsafe target:name' > "$TEST_TMP/sanitized"
@@ -1299,15 +1357,15 @@ assert_contains "$FINDINGS" '"artifact_paths":["evidence/path"]' "finding schema
 assert_contains "$FINDINGS" '"remediation":"fix it"' "finding schema records remediation"
 assert_contains "$FINDINGS" '"cleanup_notes":"clean it"' "finding schema records cleanup notes"
 assert_file "$TEST_TMP/loot-unit/unit-session/loot/credentials.txt" "sensitive root output moves to loot"
-assert_not_contains "$TEST_TMP/loot-unit/unit-session/commands/repeatable_commands.txt" "topsecret" "command artifact redacts secrets"
-assert_not_contains "$TEST_TMP/loot-unit/unit-session/raw/console-capture.txt" "topsecret" "captured console artifact redacts secrets"
+assert_not_contains "$TEST_TMP/loot-unit/unit-session/commands/repeatable_commands.txt" "fixture-redaction-marker" "command artifact redacts secrets"
+assert_not_contains "$TEST_TMP/loot-unit/unit-session/raw/console-capture.txt" "fixture-redaction-marker" "captured console artifact redacts secrets"
 
 (
     source "$ROOT_DIR/lib/fathomtrace/output.sh"
-    SHOW_SECRETS=true AUTH_PASS=topsecret SMB_PASS=""
-    sps_redact "tool --password topsecret" > "$TEST_TMP/show-secrets-unit"
+    SHOW_SECRETS=true AUTH_PASS=fixture-redaction-marker SMB_PASS=""
+    sps_redact "tool --password fixture-redaction-marker" > "$TEST_TMP/show-secrets-unit"
 )
-assert_contains "$TEST_TMP/show-secrets-unit" "topsecret" "explicit show-secrets mode bypasses redaction"
+assert_contains "$TEST_TMP/show-secrets-unit" "fixture-redaction-marker" "explicit show-secrets mode bypasses redaction"
 
 # An anonymous rpcdump normally returns many UUIDs that are not in the small
 # attack-path map. Unknown UUIDs must be ignored without tripping `set -u`.

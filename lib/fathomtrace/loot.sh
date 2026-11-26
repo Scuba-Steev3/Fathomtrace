@@ -246,7 +246,8 @@ sps_record_finding() {
     local artifact_paths="${8:-}"
     local remediation="${9:-}"
     local cleanup_notes="${10:-}"
-    local observed_at json_line
+    local status="${11:-}"
+    local observed_at json_line status_field=""
 
     [[ -z "${SPS_FINDING_IDS[$finding_id]+x}" ]] || return 0
     SPS_FINDING_IDS["$finding_id"]=1
@@ -254,8 +255,9 @@ sps_record_finding() {
     evidence="$(sps_redact "$evidence")"
     remediation="$(sps_redact "$remediation")"
     cleanup_notes="$(sps_redact "$cleanup_notes")"
+    [[ -z "$status" ]] || printf -v status_field ',"status":"%s"' "$(sps_json_escape "$status")"
 
-    printf -v json_line '{"finding_id":"%s","severity":"%s","confidence":"%s","evidence":"%s","prerequisites":{"met":%s,"missing":%s},"action_class":"%s","artifact_paths":%s,"remediation":"%s","cleanup_notes":"%s","observed_at":"%s"}' \
+    printf -v json_line '{"finding_id":"%s","severity":"%s","confidence":"%s","evidence":"%s","prerequisites":{"met":%s,"missing":%s},"action_class":"%s","artifact_paths":%s,"remediation":"%s","cleanup_notes":"%s","observed_at":"%s"%s}' \
         "$(sps_json_escape "$finding_id")" \
         "$(sps_json_escape "$severity")" \
         "$(sps_json_escape "$confidence")" \
@@ -266,7 +268,7 @@ sps_record_finding() {
         "$(sps_json_array_from_delimited "$artifact_paths")" \
         "$(sps_json_escape "$remediation")" \
         "$(sps_json_escape "$cleanup_notes")" \
-        "$(sps_json_escape "$observed_at")"
+        "$(sps_json_escape "$observed_at")" "$status_field"
     sps_atomic_append "$FINDINGS_FILE" "$json_line"
     FINDING_ENTRY_COUNT=$((FINDING_ENTRY_COUNT + 1))
 }

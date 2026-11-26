@@ -39,6 +39,7 @@ Scan command options:
       --web-wordlist FILE     Use FILE for FFUF content discovery; implies
                               --web-enum. Defaults to SecLists raft-small-words.
       --service-detect        Run Nmap against discovered TCP and UDP ports.
+      --sshole-evidence FILE  Assess SSHole using authorized host inventory.
       --imap-enum             After a successful encrypted login, list IMAP
                               mailboxes without selecting them.
       --imap-dump             Export messages read-only after login; implies

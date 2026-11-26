@@ -431,31 +431,189 @@ sps_probe_ssh_banner() {
 }
 
 declare -A SPS_OPENSSH_ADVISORY_PORTS=()
+declare -A SPS_SSHOLE_INVENTORY=()
+declare -a SPS_SSHOLE_REPORTED_PORTS=()
+SPS_SSHOLE_INPUT_ERROR=""
+SPS_SSHOLE_ALPINE_ADVISORY='https://alpinelinux.org/posts/2026-11-05-openssh-password-authentication-bypass/'
+
+sps_load_sshole_inventory() {
+    local file="$1" line key value observed now
+    local line_count=0
+    [[ -n "$file" ]] || return 0
+    SPS_SSHOLE_INVENTORY=()
+    SPS_SSHOLE_INPUT_ERROR=""
+
+    while IFS= read -r -n 257 line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        ((++line_count <= 24 && ${#line} <= 256)) || return 1
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" =~ ^([a-z_]+)=([A-Za-z0-9._:+-]+)$ ]] || return 1
+        key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+        case "$key:$value" in
+            target:* | port:* | observed_at:* | context:* | alpine_branch:* | package_version:* | \
+                running_package:verified | running_package:unknown | \
+                libc:musl | libc:glibc | libc:unknown | \
+                pam:active | pam:disabled | pam:not_built | pam:unknown | \
+                password_auth:enabled | password_auth:disabled | password_auth:unknown | \
+                account_conditions:present | account_conditions:absent | account_conditions:unknown | \
+                conflict:yes | conflict:no) ;;
+            *) return 1 ;;
+        esac
+        [[ -z "${SPS_SSHOLE_INVENTORY[$key]+x}" ]] || return 1
+        SPS_SSHOLE_INVENTORY["$key"]="$value"
+    done < "$file" || return 1
+
+    [[ "${SPS_SSHOLE_INVENTORY[target]:-}" == "$TARGET_IPV4" &&
+        "${SPS_SSHOLE_INVENTORY[port]:-}" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+    ((${SPS_SSHOLE_INVENTORY[port]} <= 65535)) || return 1
+    if [[ -z "${SPS_SSHOLE_INVENTORY[context]:-}" ]]; then
+        SPS_SSHOLE_INPUT_ERROR='Inventory is missing the assessed SSH access context.'
+        return 0
+    fi
+
+    observed="${SPS_SSHOLE_INVENTORY[observed_at]:-}"
+    if [[ "$observed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] &&
+        observed="$(date -u -d "$observed" +%s 2> /dev/null)" && now="$(date -u +%s)" &&
+        ((observed <= now && now - observed <= 86400)); then
+        return 0
+    fi
+    SPS_SSHOLE_INPUT_ERROR="Inventory timestamp is missing, invalid, or outside the 24-hour window."
+}
+
+# These cutoffs apply to official Alpine packages. A package on disk is
+# insufficient until inventory ties that build to the running listener.
+sps_sshole_alpine_patch_status() {
+    local branch="$1" version="$2" fixed index
+    local pattern='^([0-9]{1,3})\.([0-9]{1,3})_p([0-9]{1,3})-r([0-9]{1,3})$'
+    local -a installed_parts fixed_parts
+    case "$branch" in
+        edge) fixed=10.6_p2-r0 ;;
+        3.24) fixed=10.3_p1-r2 ;;
+        3.23) fixed=10.2_p1-r1 ;;
+        3.22) fixed=10.0_p1-r11 ;;
+        3.21) fixed=9.9_p2-r1 ;;
+        3.20) fixed=9.7_p1-r6 ;;
+        3.19) fixed=9.6_p1-r3 ;;
+        3.18) fixed=9.3_p2-r4 ;;
+        3.17) fixed=9.1_p1-r7 ;;
+        3.16) fixed=9.0_p1-r6 ;;
+        *) printf '%s' unknown; return ;;
+    esac
+    [[ "$version" =~ $pattern ]] || { printf '%s' unknown; return; }
+    installed_parts=("${BASH_REMATCH[@]}")
+    [[ "$fixed" =~ $pattern ]]
+    fixed_parts=("${BASH_REMATCH[@]}")
+    for index in 1 2 3 4; do
+        if ((10#${installed_parts[index]} < 10#${fixed_parts[index]})); then
+            printf '%s' unpatched
+            return
+        elif ((10#${installed_parts[index]} > 10#${fixed_parts[index]})); then
+            break
+        fi
+    done
+    printf '%s' patched
+}
 
 # Vendor backports and the server's libc, PAM, and authentication
 # configuration require host-side verification.
 sps_report_openssh_version() {
     local port="$1" version="$2" source="$3" artifact="${4:-}"
-    local major minor patch evidence
+    local major minor patch evidence candidate=false comparable=false
     local pattern='^([0-9]{1,8})\.([0-9]{1,8})(p([0-9]{1,8}))?($|[-+])'
     local advisory='https://nvd.nist.gov/vuln/detail/CVE-2026-123158'
-    local remediation='Verify the installed package against the distribution advisory and apply its fixed build or upgrade to OpenSSH 10.6p2 or later.'
+    local remediation='Apply the distribution fix or upgrade to OpenSSH 10.6p2 or later, then restart sshd.'
+    local status confidence=low severity=high verify_note=""
+    local met='Open TCP port|OpenSSH service identified' missing='Host-side package, libc, PAM, password policy and account verification'
+    local branch package patch_status=unknown libc pam password accounts package_series banner_series
 
-    [[ -z "${SPS_OPENSSH_ADVISORY_PORTS[$port]+x}" && "$version" =~ $pattern ]] || return 0
-    major="${BASH_REMATCH[1]}"
-    minor="${BASH_REMATCH[2]}"
-    patch="${BASH_REMATCH[4]:-0}"
-    ((10#$major < 10 || (10#$major == 10 &&
-        (10#$minor < 6 || (10#$minor == 6 && 10#$patch < 2))))) || return 0
+    [[ -z "${SPS_OPENSSH_ADVISORY_PORTS[$port]+x}" ]] || return 0
+    [[ "$version" =~ ^[0-9A-Za-z._+-]{1,64}$ ]] || version=""
+    if [[ "$version" =~ $pattern ]]; then
+        major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[4]:-}"
+        comparable=true
+        if ((10#$major < 10 || (10#$major == 10 &&
+            (10#$minor < 6 || (10#$minor == 6 && 10#${patch:-0} < 2))))); then
+            candidate=true
+        fi
+    fi
 
-    SPS_OPENSSH_ADVISORY_PORTS["$port"]=1
-    evidence="Potential exposure to CVE-2026-123158 (SSHole) on TCP/$port. $source identified OpenSSH $version."
-    warn "$evidence Verify Linux with musl libc and PAM disabled, password authentication, and distribution patch status. $advisory"
+    if [[ "${SPS_SSHOLE_INVENTORY[port]:-}" == "$port" ]]; then
+        branch="${SPS_SSHOLE_INVENTORY[alpine_branch]:-unknown}"
+        package="${SPS_SSHOLE_INVENTORY[package_version]:-unknown}"
+        libc="${SPS_SSHOLE_INVENTORY[libc]:-unknown}" pam="${SPS_SSHOLE_INVENTORY[pam]:-unknown}"
+        password="${SPS_SSHOLE_INVENTORY[password_auth]:-unknown}" accounts="${SPS_SSHOLE_INVENTORY[account_conditions]:-unknown}"
+        verify_note="$SPS_SSHOLE_INPUT_ERROR"
+        if [[ "${SPS_SSHOLE_INVENTORY[conflict]:-no}" == yes ]]; then
+            verify_note='Host inventory contains conflicting evidence.'
+        elif [[ "${SPS_SSHOLE_INVENTORY[running_package]:-unknown}" == verified ]]; then
+            patch_status="$(sps_sshole_alpine_patch_status "$branch" "$package")"
+            if [[ "$patch_status" != unknown && "$comparable" == true ]]; then
+                package_series="${package%-r*}"
+                banner_series="$major.$minor"
+                [[ -z "$patch" ]] || banner_series+="_p$patch"
+                if [[ -z "$patch" ]]; then
+                    package_series="${package_series%_p*}"
+                fi
+                [[ "$package_series" == "$banner_series" ]] || verify_note='Running package conflicts with the SSH fingerprint.'
+            fi
+        fi
+
+        met+='|Authorized inventory matched the target IP and TCP port'
+        evidence="Host inventory observed ${SPS_SSHOLE_INVENTORY[observed_at]:-unknown}, context ${SPS_SSHOLE_INVENTORY[context]:-unknown}, Alpine $branch, package $package, patch $patch_status, libc $libc, PAM $pam, password policy $password, account conditions $accounts."
+        if [[ -n "$verify_note" ]]; then
+            status=INCONCLUSIVE
+            missing='Fresh, consistent host-side evidence'
+        elif [[ "$patch_status" == patched || "$libc" == glibc || "$pam" == active || "$password" == disabled || "$accounts" == absent ]]; then
+            status=NOT_AFFECTED confidence=high severity=informational missing=""
+        elif [[ "$patch_status" == unpatched && "$libc" == musl && "$password" == enabled ]]; then
+            if [[ ( "$pam" == disabled || "$pam" == not_built ) && "$accounts" == present ]]; then
+                status=VULNERABLE confidence=high missing=""
+            else
+                status=LIKELY_VULNERABLE confidence=medium missing='Effective PAM or account prerequisite verification'
+            fi
+        elif [[ "$candidate" == true ]]; then
+            status=POTENTIALLY_VULNERABLE
+        else
+            status=INCONCLUSIVE
+        fi
+    elif [[ "$candidate" == true ]]; then
+        status=POTENTIALLY_VULNERABLE
+    else
+        return 0
+    fi
+
+    SPS_OPENSSH_ADVISORY_PORTS["$port"]="$status"
+    SPS_SSHOLE_REPORTED_PORTS+=("$port")
+    evidence="CVE-2026-123158 (SSHole, CVSS 3.1 8.1) on TCP/$port: $status. $source identified OpenSSH ${version:-with no version}. ${evidence:-} $verify_note"
+    if [[ "$status" == NOT_AFFECTED ]]; then
+        info "$evidence"
+        remediation=""
+    else
+        warn "$evidence"
+        [[ -z "$missing" ]] || note "Evidence needed: $missing"
+    fi
     sps_record_finding \
-        "CVE-2026-123158-TCP-$port" "high" "low" "$evidence" \
-        "Open TCP port|OpenSSH service version prior to 10.6p2" \
-        "Linux with musl libc and PAM disabled|Affected password authentication and account configuration|Vendor patch status" \
-        "discovery" "$artifact" "$remediation $advisory"
+        "CVE-2026-123158-TCP-$port" "$severity" "$confidence" "$evidence" \
+        "$met" "$missing" "discovery" "$artifact" "$remediation $advisory $SPS_SSHOLE_ALPINE_ADVISORY" "" "$status"
+}
+
+sps_finish_sshole_assessment() {
+    local inventory_port="${SPS_SSHOLE_INVENTORY[port]:-}" port status
+    if [[ -n "$inventory_port" && -z "${SPS_OPENSSH_ADVISORY_PORTS[$inventory_port]+x}" ]]; then
+        status=SKIPPED
+        SPS_OPENSSH_ADVISORY_PORTS["$inventory_port"]="$status"
+        SPS_SSHOLE_REPORTED_PORTS+=("$inventory_port")
+        info "CVE-2026-123158 (SSHole) on TCP/$inventory_port: $status. OpenSSH could not be identified on the inventory endpoint."
+        sps_record_finding "CVE-2026-123158-TCP-$inventory_port" "informational" "low" \
+            "OpenSSH could not be identified on the inventory endpoint." "" "OpenSSH service identification" \
+            "discovery" "" "" "" "$status"
+    fi
+    if [[ -n "${ATTACK_PATH_REPORT:-}" ]]; then
+        for port in "${SPS_SSHOLE_REPORTED_PORTS[@]}"; do
+            status="${SPS_OPENSSH_ADVISORY_PORTS[$port]}"
+            sps_atomic_append "$ATTACK_PATH_REPORT" "[Exposure context] CVE-2026-123158 TCP/$port: $status"
+        done
+    fi
 }
 
 sps_report_openssh_advisory() {

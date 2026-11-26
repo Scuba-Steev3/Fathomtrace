@@ -186,7 +186,7 @@ Client errors appear on the terminal and return a nonzero exit status.
 | Commands | `scan`, `help`, `version` |
 | Port selection | `--profile default\|web\|ad\|extended`, repeatable `--ports LIST`, `--udp-ports LIST`, `--no-udp` |
 | Performance | `--jobs N`, `--connect-timeout SEC`, `--retries N` |
-| Service detection | `--service-detect` |
+| Service detection | `--service-detect`, `--sshole-evidence FILE` |
 | Output | `--format text\|json\|csv`, `--quiet`, `--verbose`, `--debug`, `--color`, `--no-color`, `--ascii`, `--unicode`, `--show-secrets` |
 | Artifacts | `--no-loot`, `--loot-dir PATH`, `--index-format text\|json\|csv\|all`, `--overwrite` |
 | Optional checks | `--skip-preflight`, `--skip-null-checks`, `--skip-guest-checks`, `--skip-dacl-audit` |
@@ -198,6 +198,51 @@ earlier than 10.6p2 produce a potential-exposure advisory for CVE-2026-123158.
 `--service-detect` can also identify SSH on alternate ports selected for the
 scan. The SSH version alone leaves libc, PAM, authentication settings, and
 distribution backports unverified.
+
+For a stronger SSHole verdict, supply authorized host inventory for the scanner's
+resolved IPv4 address and the same TCP port, source network, and effective SSH
+account policy. Use `--service-detect` for alternate ports.
+
+```bash
+fathomtrace scan 192.0.2.1 --ports 2222 --no-udp --service-detect \
+  --sshole-evidence sshole-inventory.txt
+```
+
+The optional inventory file contains one endpoint. Use a current UTC timestamp
+from the assessment in `observed_at`. The scanner accepts evidence up to 24 hours
+old.
+
+```text
+target=192.0.2.1
+port=2222
+observed_at=YYYY-MM-DDTHH:MM:SSZ
+context=assessment-network-managed-accounts
+alpine_branch=3.24
+package_version=10.3_p1-r1
+running_package=verified
+libc=musl
+pam=disabled
+password_auth=enabled
+account_conditions=present
+conflict=no
+```
+
+Set `running_package=verified` only after linking the listening sshd process to
+the stated official Alpine package build. Use `pam=not_built` when build evidence
+verifies PAM is absent, `pam=disabled` when a PAM-capable build has effective
+`UsePAM no`, or `pam=active` when it is effective. The password policy and
+account conditions must describe the same assessable context, including any
+applicable SSH access restrictions. Record only the verified status of the
+advisory's account prerequisites. Use `unknown` for unverified values and
+`conflict=yes` for conflicting evidence. Keep credentials and account
+material out of the inventory file.
+
+The terminal and Recon Synopsis show the verdict. `reports/findings.jsonl` carries
+the same value in `status`, with the evidence source and missing prerequisites.
+JSON and CSV run summaries retain their existing findings-file reference. The
+attack-path report records the verdict as exposure context. `VULNERABLE`
+means the supplied host evidence verifies the vulnerable configuration.
+`NOT_AFFECTED` applies to the assessed endpoint and account context.
 
 When TCP/3389 is open and both `--user` and `--pass` are supplied, Fathomtrace
 uses `nxc rdp` or `netexec rdp` to validate exactly that single credential pair.

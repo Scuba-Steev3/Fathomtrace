@@ -15,6 +15,9 @@ All notable changes to this repository will be documented in this file.
 
 ### Changed
 
+- Bumped Fathomtrace to 2.1.5 for evidence-based SSHole verdicts with optional
+  Alpine host inventory, vendor backport evaluation, and structured finding status.
+
 - Bumped Fathomtrace to 2.1.4. Scans report the SSH banner and protocol
   version on open TCP/22 and flag potential exposure to CVE-2026-123158.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # Values are consumed by the sourcing entry point.
 
-SPS_VERSION="2.1.4"
+SPS_VERSION="2.1.5"
 
 sps_cli_defaults() {
     COMMAND="scan"
@@ -25,6 +25,7 @@ sps_cli_defaults() {
     SHOW_SECRETS=false
     DRY_RUN=false
     SKIP_PREFLIGHT=false
+    SSHOLE_EVIDENCE_FILE=""
     SKIP_NULL_CHECKS=false
     SKIP_GUEST_CHECKS=false
     SKIP_DACL_AUDIT=false
@@ -292,6 +293,15 @@ sps_parse_args() {
             --service-detect)
                 ENABLE_SERVICE_DETECT=true
                 ;;
+            --sshole-evidence=*)
+                SSHOLE_EVIDENCE_FILE="${option#*=}"
+                sps_require_value "--sshole-evidence" "$SSHOLE_EVIDENCE_FILE" || return $?
+                ;;
+            --sshole-evidence)
+                shift
+                sps_require_value "$option" "${1:-}" || return $?
+                SSHOLE_EVIDENCE_FILE="$1"
+                ;;
             --imap-enum)
                 ENABLE_IMAP_ENUM=true
                 ;;
@@ -429,6 +439,9 @@ sps_parse_args() {
     if [[ "$IMAP_MAILBOX" =~ [[:cntrl:]] ]]; then
         sps_cli_fail "--imap-mailbox cannot contain control characters." || return $?
     fi
+    if [[ -n "$SSHOLE_EVIDENCE_FILE" && ( ! -f "$SSHOLE_EVIDENCE_FILE" || ! -r "$SSHOLE_EVIDENCE_FILE" ) ]]; then
+        sps_cli_fail "--sshole-evidence requires a readable inventory file." || return $?
+    fi
     if [[ "$IMAP_MAILBOX_EXPLICIT" == true && "$ENABLE_IMAP_DUMP" != true ]]; then
         sps_cli_fail "--imap-mailbox requires --imap-dump." || return $?
     fi
@@ -508,6 +521,7 @@ Scan command options:
       --web-wordlist FILE     Use FILE for FFUF content discovery; implies
                               --web-enum. Defaults to SecLists raft-small-words.
       --service-detect        Run Nmap against discovered TCP and UDP ports.
+      --sshole-evidence FILE  Assess SSHole using authorized host inventory.
       --imap-enum             After a successful encrypted login, list IMAP
                               mailboxes without selecting them.
       --imap-dump             Export messages read-only after login; implies
