@@ -238,6 +238,8 @@ RDP_AUTH_STATUS="skipped"
 RDP_AUTH_REASON="TCP/3389 is not open"
 RDP_AUTH_PROVIDER="none"
 SSH_DETECTED=false
+SSH_PORT_OPEN=false
+SSH_SERVICE_CONFIRMED=false
 ASREP_OK=false
 KERBEROS_AUTH_OK=false
 KERBEROS_AUTH_CHECKED=false
@@ -506,6 +508,7 @@ service_version_detection() {
         /^OS details:/ {print}
         /^Aggressive OS guesses:/ {print}
     ' "$nmap_output"
+    sps_report_openssh_advisory "$nmap_output"
 }
 
 get_preferred_dc_host() {
@@ -8067,6 +8070,7 @@ info "Service states (port open / service confirmed / access confirmed):"
 printf '    LDAP:     %s / %s / %s\n' "$LDAP_PORT_OPEN" "$LDAP_SERVICE_CONFIRMED" "$LDAP_ACCESS_CONFIRMED"
 printf '    Kerberos: %s / %s / %s\n' "$KERBEROS_PORT_OPEN" "$KERBEROS_SERVICE_CONFIRMED" "$KERBEROS_ACCESS_CONFIRMED"
 printf '    SMB:      %s / %s / %s\n' "$SMB_PORT_OPEN" "$SMB_SERVICE_CONFIRMED" "$SMB_ACCESS_CONFIRMED"
+printf '    SSH/22:   %s / %s / n/a\n' "$SSH_PORT_OPEN" "$SSH_SERVICE_CONFIRMED"
 printf '    SMTP:     %s / %s / n/a\n' "$SMTP_PORT_OPEN" "$SMTP_SERVICE_CONFIRMED"
 printf '    POP3:     %s / %s / n/a\n' "$POP3_PORT_OPEN" "$POP3_SERVICE_CONFIRMED"
 printf '    IMAP:     %s / %s / %s\n' "$IMAP_PORT_OPEN" "$IMAP_SERVICE_CONFIRMED" "${IMAP_AUTH_OK:-false}"

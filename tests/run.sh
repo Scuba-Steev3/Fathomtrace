@@ -74,17 +74,17 @@ fi
 
 run_cli version --version
 assert_eq 0 "$CLI_RC" "version exits successfully"
-assert_contains "$CLI_STDOUT" "fathomtrace 2.1.3" "version is stable"
+assert_contains "$CLI_STDOUT" "fathomtrace 2.1.4" "version is stable"
 
 "$LEGACY_SCRIPT" --version > "$TEST_TMP/legacy.stdout" 2> "$TEST_TMP/legacy.stderr"
 assert_eq 0 "$?" "legacy command wrapper exits successfully"
-assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.3" "legacy command wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/legacy.stdout" "fathomtrace 2.1.4" "legacy command wrapper delegates to Fathomtrace"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix" --no-legacy-wrapper > "$TEST_TMP/install.stdout" 2> "$TEST_TMP/install.stderr"
 assert_eq 0 "$?" "prefix installer exits successfully"
 "$TEST_TMP/install-prefix/bin/fathomtrace" --version > "$TEST_TMP/installed.stdout" 2> "$TEST_TMP/installed.stderr"
 assert_eq 0 "$?" "installed prefix layout resolves libraries"
-assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.3" "installed command reports the Fathomtrace version"
+assert_contains "$TEST_TMP/installed.stdout" "fathomtrace 2.1.4" "installed command reports the Fathomtrace version"
 assert_no_file "$TEST_TMP/install-prefix/bin/bash_simpleportscan.sh" "installer can omit the legacy wrapper"
 
 "$ROOT_DIR/install.sh" --prefix "$TEST_TMP/install-prefix-legacy" > "$TEST_TMP/install-legacy.stdout" 2> "$TEST_TMP/install-legacy.stderr"
@@ -92,7 +92,7 @@ assert_eq 0 "$?" "default installer exits successfully"
 assert_file "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" "default installer includes the legacy wrapper"
 "$TEST_TMP/install-prefix-legacy/bin/bash_simpleportscan.sh" --version > "$TEST_TMP/installed-legacy.stdout" 2> "$TEST_TMP/installed-legacy.stderr"
 assert_eq 0 "$?" "installed legacy wrapper exits successfully"
-assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.3" "installed legacy wrapper delegates to Fathomtrace"
+assert_contains "$TEST_TMP/installed-legacy.stdout" "fathomtrace 2.1.4" "installed legacy wrapper delegates to Fathomtrace"
 
 run_cli unknown --definitely-unknown
 assert_eq 2 "$CLI_RC" "unknown option uses CLI exit code"
@@ -226,6 +226,56 @@ assert_contains "$TEST_TMP/default-mail-ports.txt" "587:SMTP Submission:interest
 assert_contains "$TEST_TMP/default-mail-ports.txt" "2525:SMTP-Alt:interesting" "extended profile includes alternate SMTP"
 assert_contains "$TEST_TMP/default-mail-ports.txt" "993:IMAPS:interesting" "default profile retains implicit TLS IMAP"
 assert_contains "$TEST_TMP/default-mail-ports.txt" "995:POP3S:interesting" "default profile includes implicit TLS POP3"
+
+cat > "$TEST_TMP/openssh-services.txt" <<'EOF'
+PORT       STATE    SERVICE VERSION
+22/tcp     open     ssh     OpenSSH 10.6 (protocol 2.0)
+2222/tcp   open     ssh     OpenSSH 10.6p1-r0 (protocol 2.0)
+2223/tcp   open     ssh     OpenSSH 9.9p9 Ubuntu (protocol 2.0)
+2224/tcp   open     ssh     OpenSSH 10.6p2 (protocol 2.0)
+2225/tcp   open     ssh     OpenSSH 10.6p10 (protocol 2.0)
+2226/tcp   open     ssh     OpenSSH 11.0 (protocol 2.0)
+2227/tcp   open     ssh     Dropbear sshd (protocol 2.0)
+2228/tcp   filtered ssh     OpenSSH 10.6 (protocol 2.0)
+2229/tcp   open     ssh     OpenSSH (protocol 2.0)
+2230/tcp   open     ssh     OpenSSH 10.10 (protocol 2.0)
+EOF
+(
+    source "$ROOT_DIR/lib/fathomtrace/scan.sh"
+    warn() { printf '%s\n' "$*"; }
+    sps_record_finding() { printf '%s\n' "$1|$2|$3|$6|$8" >> "$TEST_TMP/openssh-findings.txt"; }
+    sps_report_openssh_advisory "$TEST_TMP/openssh-services.txt"
+) > "$TEST_TMP/openssh-advisory.txt"
+assert_contains "$TEST_TMP/openssh-advisory.txt" "Potential exposure to CVE-2026-123158" "SSH advisory is reported as potential exposure"
+assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-22|high|low|Linux with musl libc and PAM disabled" "SSH advisory records its unverified platform prerequisite"
+assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-2222|high|low" "SSH advisory supports nonstandard ports and vendor suffixes"
+assert_contains "$TEST_TMP/openssh-findings.txt" "CVE-2026-123158-TCP-2223|high|low" "SSH advisory covers earlier upstream versions"
+assert_eq 3 "$(awk 'END {print NR}' "$TEST_TMP/openssh-findings.txt")" "SSH advisory excludes fixed versions and inconclusive service rows"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/scan.sh"
+    info() { printf '%s\n' "$*"; }
+    warn() { printf '%s\n' "$*"; }
+    sps_record_finding() { printf '%s\n' "$1"; }
+    timeout() { printf '%s\r\n' "$SSH_TEST_RESPONSE"; }
+    SKIP_PREFLIGHT=true
+    TARGET_IPV4=127.0.0.1
+    SSH_SERVICE_CONFIRMED=false
+    SSH_TEST_RESPONSE='SSH-2.0-OpenSSH_10.6p1 Alpine Linux'
+    sps_probe_open_port 22
+    printf 'ssh-state=%s/%s\n' "$SSH_PORT_OPEN" "$SSH_SERVICE_CONFIRMED"
+    sps_report_openssh_advisory "$TEST_TMP/openssh-services.txt"
+    SSH_SERVICE_CONFIRMED=false
+    SSH_TEST_RESPONSE='220 FTP server ready'
+    sps_probe_ssh_banner 127.0.0.1 22 || printf 'rejected non-SSH response\n'
+    printf 'ssh-confirmed=%s\n' "$SSH_SERVICE_CONFIRMED"
+) > "$TEST_TMP/ssh-banner.txt"
+assert_contains "$TEST_TMP/ssh-banner.txt" 'ssh-state=true/true' 'TCP/22 SSH identification runs without optional preflight'
+assert_contains "$TEST_TMP/ssh-banner.txt" 'protocol 2.0, advertised software OpenSSH_10.6p1' 'SSH banner reports protocol and software'
+assert_eq 1 "$(grep -Fxc 'CVE-2026-123158-TCP-22' "$TEST_TMP/ssh-banner.txt")" 'SSH banner and Nmap share one advisory per port'
+assert_contains "$TEST_TMP/ssh-banner.txt" 'rejected non-SSH response' 'SSH banner ignores unrelated services on TCP/22'
+assert_contains "$TEST_TMP/ssh-banner.txt" 'ssh-confirmed=false' 'unrelated service does not confirm SSH'
+
 assert_contains "$SCRIPT" 'for bh_tool in bloodhound-ce-python bloodhound-python; do' "BloodHound CE collector is preferred with legacy fallback"
 assert_contains "$SCRIPT" 'bh_collection="All"' "BloodHound CE uses the All collection method"
 assert_contains "$SCRIPT" '-c "$bh_collection" --zip' "BloodHound collector receives its selected collection method"
@@ -247,6 +297,30 @@ assert_contains "$TEST_TMP/netexec-smb-domain-args.txt" "-u|hodor|-p|hodor|-d|NO
 ) > "$TEST_TMP/netexec-smb-no-domain-args.txt"
 assert_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-u|hodor|-p|hodor" "NetExec SMB authentication works without a domain"
 assert_not_contains "$TEST_TMP/netexec-smb-no-domain-args.txt" "-d" "NetExec SMB authentication omits an empty domain"
+
+(
+    source "$ROOT_DIR/lib/fathomtrace/validation.sh"
+    info() { :; }
+    debug() { printf '%s\n' "$*"; }
+    sps_command_available() { [[ "$1" == getent ]]; }
+    timeout() {
+        [[ "$*" == '2s getent hosts 192.0.2.1' ]] || return 125
+        if [[ "$REVERSE_DNS_TEST_RESULT" == timeout ]]; then
+            return 124
+        fi
+        printf '192.0.2.1 server.example.test\n'
+    }
+    SKIP_PREFLIGHT=false
+    HOSTS_FILE="$TEST_TMP/reverse-dns-hosts.txt"
+    DISCOVERED_HOSTS="$TEST_TMP/reverse-dns-discovered.txt"
+    REVERSE_DNS_TEST_RESULT=timeout
+    sps_resolve_target 192.0.2.1 && printf 'target=%s\n' "$TARGET_IPV4"
+    REVERSE_DNS_TEST_RESULT=success
+    sps_resolve_target 192.0.2.1 && printf 'hostname=%s\n' "$TARGET_FQDN"
+) > "$TEST_TMP/reverse-dns.txt"
+assert_contains "$TEST_TMP/reverse-dns.txt" 'timed out after 2 seconds' 'reverse DNS reports its deadline in debug output'
+assert_contains "$TEST_TMP/reverse-dns.txt" 'target=192.0.2.1' 'reverse DNS timeout preserves the numeric target'
+assert_contains "$TEST_TMP/reverse-dns.txt" 'hostname=server.example.test' 'a timely reverse DNS response still populates the hostname'
 
 (
     source "$ROOT_DIR/lib/fathomtrace/validation.sh"
@@ -378,7 +452,7 @@ assert_not_contains "$CLI_STDOUT" "Authorized Recon" "CSV stdout has no banner"
 run_cli no-color 127.0.0.1 --dry-run --no-loot --skip-preflight --no-color --ascii --ports 80
 assert_eq 0 "$CLI_RC" "no-color dry run succeeds"
 assert_not_contains "$CLI_STDOUT" $'\033[' "no-color removes ANSI sequences"
-assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.3" "text startup banner includes the application version"
+assert_contains "$CLI_STDOUT" "Fathomtrace v2.1.4" "text startup banner includes the application version"
 assert_contains "$CLI_STDOUT" "[*] Validating target" "ASCII information icon is used"
 
 run_cli force-color 127.0.0.1 --dry-run --no-loot --skip-preflight --color always --ascii --ports 80

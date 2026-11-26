@@ -314,6 +314,11 @@ sps_probe_open_port() {
     local port="$1"
     local redirect host_name ldap_uri ldap_dn ldap_output ldap_rc=0 scheme
 
+    if [[ "$port" == 22 ]]; then
+        SSH_PORT_OPEN=true
+        sps_probe_ssh_banner "$TARGET_IPV4" "$port" || debug "SSH identification unavailable on TCP/$port"
+    fi
+
     # Selected web modules require protocol evidence even when generic optional
     # preflight discovery was disabled. Every open port is tested so custom
     # --ports values can be recognized as HTTP/HTTPS services.
@@ -390,6 +395,84 @@ sps_probe_open_port() {
                 "Only a read-only containers listing request was sent."
         fi
     fi
+}
+
+sps_probe_ssh_banner() {
+    local target="$1" port="$2"
+    local identification protocol software evidence
+    local pattern='^SSH-([0-9]+\.[0-9]+)-([!-~]+)( [[:print:]]*)?$'
+    local LC_ALL=C
+
+    identification="$(LC_ALL=C timeout 2s bash -c '
+        exec 7<>"/dev/tcp/$1/$2" || exit 1
+        for ((line_count = 0; line_count < 8; line_count++)); do
+            IFS= read -r -n 255 line <&7 || exit 1
+            ((${#line} < 255)) || exit 1
+            case "$line" in
+                SSH-*) printf "%s\n" "$line"; exit 0 ;;
+            esac
+        done
+        exit 1
+    ' _ "$target" "$port" 2> /dev/null)" || return 1
+    identification="${identification%$'\r'}"
+    ((${#identification} <= 253)) || return 1
+    [[ "$identification" =~ $pattern ]] || return 1
+    protocol="${BASH_REMATCH[1]}"
+    software="${BASH_REMATCH[2]}"
+
+    SSH_SERVICE_CONFIRMED=true
+    evidence="SSH confirmed on TCP/$port (protocol $protocol, advertised software $software)."
+    info "$evidence"
+    sps_record_finding "SSH-SERVICE-TCP-$port" "informational" "high" "$evidence" \
+        "Open TCP port|SSH server identification received" "" "discovery"
+    if [[ "$software" == OpenSSH_* ]]; then
+        sps_report_openssh_version "$port" "${software#OpenSSH_}" "SSH banner"
+    fi
+}
+
+declare -A SPS_OPENSSH_ADVISORY_PORTS=()
+
+# Vendor backports and the server's libc, PAM, and authentication
+# configuration require host-side verification.
+sps_report_openssh_version() {
+    local port="$1" version="$2" source="$3" artifact="${4:-}"
+    local major minor patch evidence
+    local pattern='^([0-9]{1,8})\.([0-9]{1,8})(p([0-9]{1,8}))?($|[-+])'
+    local advisory='https://nvd.nist.gov/vuln/detail/CVE-2026-123158'
+    local remediation='Verify the installed package against the distribution advisory and apply its fixed build or upgrade to OpenSSH 10.6p2 or later.'
+
+    [[ -z "${SPS_OPENSSH_ADVISORY_PORTS[$port]+x}" && "$version" =~ $pattern ]] || return 0
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[4]:-0}"
+    ((10#$major < 10 || (10#$major == 10 &&
+        (10#$minor < 6 || (10#$minor == 6 && 10#$patch < 2))))) || return 0
+
+    SPS_OPENSSH_ADVISORY_PORTS["$port"]=1
+    evidence="Potential exposure to CVE-2026-123158 (SSHole) on TCP/$port. $source identified OpenSSH $version."
+    warn "$evidence Verify Linux with musl libc and PAM disabled, password authentication, and distribution patch status. $advisory"
+    sps_record_finding \
+        "CVE-2026-123158-TCP-$port" "high" "low" "$evidence" \
+        "Open TCP port|OpenSSH service version prior to 10.6p2" \
+        "Linux with musl libc and PAM disabled|Affected password authentication and account configuration|Vendor patch status" \
+        "discovery" "$artifact" "$remediation $advisory"
+}
+
+sps_report_openssh_advisory() {
+    local nmap_output="$1"
+    local port product version
+
+    while read -r port product version; do
+        [[ "$port" == 22 ]] && SSH_SERVICE_CONFIRMED=true
+        if [[ "$product" == OpenSSH ]]; then
+            sps_report_openssh_version "$port" "$version" "Nmap" "$nmap_output"
+        fi
+    done < <(awk '
+        $1 ~ /^[0-9]+\/tcp$/ && $2 == "open" && $3 == "ssh" {
+            sub(/\/tcp$/, "", $1)
+            print $1, $4, $5
+        }
+    ' "$nmap_output")
 }
 
 sps_run_service_probes() {

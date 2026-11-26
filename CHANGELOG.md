@@ -15,6 +15,9 @@ All notable changes to this repository will be documented in this file.
 
 ### Changed
 
+- Bumped Fathomtrace to 2.1.4. Scans report the SSH banner and protocol
+  version on open TCP/22 and flag potential exposure to CVE-2026-123158.
+
 - Bumped Fathomtrace to 2.1.3 for database version and OS hints in scans
   and hostname and OS metadata in authenticated database inventory. SQL Server scans also report instance and hostname when available.
 

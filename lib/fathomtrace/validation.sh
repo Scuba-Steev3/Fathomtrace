@@ -159,15 +159,17 @@ sps_validate_selected_features() {
 
 sps_reverse_lookup() {
     local address="$1"
-    local hostname=""
+    local response
     if sps_command_available getent; then
-        hostname="$(getent hosts "$address" 2> /dev/null | awk 'NR == 1 {print $2}')"
+        response="$(timeout 2s getent hosts "$address" 2> /dev/null)" || return $?
+        awk 'NR == 1 {print $2}' <<< "$response"
     elif sps_command_available dig; then
-        hostname="$(dig +short -x "$address" 2> /dev/null | sed 's/[.]$//' | head -n 1)"
+        response="$(timeout 2s dig +short -x "$address" 2> /dev/null)" || return $?
+        awk 'NR == 1 {sub(/[.]$/, ""); print}' <<< "$response"
     elif sps_command_available host; then
-        hostname="$(host "$address" 2> /dev/null | awk '/domain name pointer/ {sub(/[.]$/, "", $NF); print $NF; exit}')"
+        response="$(timeout 2s host "$address" 2> /dev/null)" || return $?
+        awk '/domain name pointer/ {sub(/[.]$/, "", $NF); print $NF; exit}' <<< "$response"
     fi
-    printf '%s' "$hostname"
 }
 
 sps_forward_lookup() {
@@ -187,6 +189,7 @@ sps_resolve_target() {
     local input="$1"
     local resolved_ip=""
     local reverse_name=""
+    local reverse_status=0
 
     ORIGINAL_TARGET="$input"
     info "Validating target: $input"
@@ -194,13 +197,15 @@ sps_resolve_target() {
     if sps_is_ipv4 "$input"; then
         TARGET_IPV4="$input"
         if [[ "${SKIP_PREFLIGHT:-false}" != true ]]; then
-            reverse_name="$(sps_reverse_lookup "$input")"
+            reverse_name="$(sps_reverse_lookup "$input")" || reverse_status=$?
             if [[ -n "$reverse_name" ]]; then
                 ORIGINAL_HOSTNAME="$reverse_name"
                 TARGET_FQDN="$reverse_name"
                 printf '%s %s\n' "$input" "$reverse_name" >> "$HOSTS_FILE"
                 printf '%s\n' "$reverse_name" >> "$DISCOVERED_HOSTS"
                 info "Reverse DNS resolved $input to $reverse_name"
+            elif ((reverse_status == 124)); then
+                debug "Reverse DNS lookup for $input timed out after 2 seconds"
             else
                 debug "No reverse DNS result for $input"
             fi

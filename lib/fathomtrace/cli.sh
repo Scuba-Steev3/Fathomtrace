@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # Values are consumed by the sourcing entry point.
 
-SPS_VERSION="2.1.3"
+SPS_VERSION="2.1.4"
 
 sps_cli_defaults() {
     COMMAND="scan"

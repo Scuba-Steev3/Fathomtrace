@@ -186,10 +186,18 @@ Client errors appear on the terminal and return a nonzero exit status.
 | Commands | `scan`, `help`, `version` |
 | Port selection | `--profile default\|web\|ad\|extended`, repeatable `--ports LIST`, `--udp-ports LIST`, `--no-udp` |
 | Performance | `--jobs N`, `--connect-timeout SEC`, `--retries N` |
+| Service detection | `--service-detect` |
 | Output | `--format text\|json\|csv`, `--quiet`, `--verbose`, `--debug`, `--color`, `--no-color`, `--ascii`, `--unicode`, `--show-secrets` |
 | Artifacts | `--no-loot`, `--loot-dir PATH`, `--index-format text\|json\|csv\|all`, `--overwrite` |
 | Optional checks | `--skip-preflight`, `--skip-null-checks`, `--skip-guest-checks`, `--skip-dacl-audit` |
 | Authentication | `--user USER`, `--pass PASS`, `--domain DOMAIN` |
+
+When TCP/22 is open, Fathomtrace reads the SSH server identification string
+and reports the advertised software and protocol version. OpenSSH versions
+earlier than 10.6p2 produce a potential-exposure advisory for CVE-2026-123158.
+`--service-detect` can also identify SSH on alternate ports selected for the
+scan. The SSH version alone leaves libc, PAM, authentication settings, and
+distribution backports unverified.
 
 When TCP/3389 is open and both `--user` and `--pass` are supplied, Fathomtrace
 uses `nxc rdp` or `netexec rdp` to validate exactly that single credential pair.
